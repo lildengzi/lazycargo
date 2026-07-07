@@ -5,9 +5,6 @@
 /.agents/
 /.codex/
 
-# Local-only GitHub workflow drafts
-/.github/workflows/
-
 # Editor / IDE
 .idea/
 .vscode/
