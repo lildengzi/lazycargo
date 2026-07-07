@@ -1,12 +1,13 @@
+use std::fs::{self, File};
 use std::io;
-use std::io::Write;
-use std::process::{Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ansi_to_tui::IntoText as _;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, MouseButton,
-    MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -24,15 +25,19 @@ use ratatui::{Frame, Terminal};
 
 use crate::metadata::ProjectInfo;
 use lazycargo_search::{
-    base_search_detail, extract_crate_author, extract_crate_info_lines, parse_crate_search_results,
-    SearchState,
+    crate_info_detail, extract_crate_author, parse_crate_search_results, search_error_detail,
+    search_timeout_detail, CrateInfoReport, SearchLinkTarget, SearchState,
 };
 
 mod dashboard;
+mod runner;
+mod terminal_support;
 
 use dashboard::{
     apply_filter, build_items, dependency_items_for, list_offset, output_lines, workspace_items,
 };
+use runner::{command_output_with_timeout, extract_diagnostics, split_output};
+use terminal_support::{copy_to_clipboard, first_url, open_url};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -83,13 +88,6 @@ enum InputMode {
     Normal,
     Filter,
     CrateSearch,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SearchLinkTarget {
-    Crates,
-    Docs,
-    Repository,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +197,12 @@ struct App {
     workspace_selected: usize,
     dependency_selected: usize,
     build_selected: usize,
+    running_child: Option<Child>,
+    running_command: String,
+    running_start: Instant,
+    running_focus: Focus,
+    running_stdout_path: Option<PathBuf>,
+    running_stderr_path: Option<PathBuf>,
 }
 
 impl App {
@@ -243,6 +247,12 @@ impl App {
             workspace_selected: 0,
             dependency_selected: 0,
             build_selected: 0,
+            running_child: None,
+            running_command: String::new(),
+            running_start: Instant::now(),
+            running_focus: Focus::Build,
+            running_stdout_path: None,
+            running_stderr_path: None,
         }
     }
 
@@ -402,6 +412,9 @@ impl App {
 
     fn switch_context_tab(&mut self, delta: isize) {
         let tabs = self.active_context_tabs();
+        if tabs.is_empty() {
+            return;
+        }
         let current = self.active_context_tab();
         let index = tabs.iter().position(|tab| *tab == current).unwrap_or(0);
         let next = (index as isize + delta).rem_euclid(tabs.len() as isize) as usize;
@@ -483,6 +496,9 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.kill_running_child()
+            }
             KeyCode::Char('q') if self.search.expanded => {
                 self.search.expanded = false;
                 self.set_focus(self.search_return_focus);
@@ -627,7 +643,7 @@ impl App {
             self.right_scroll = 0;
         }
         if self.focus == Focus::Workspace {
-            self.dependency_selected = 0;
+            self.sync_workspace_selection();
         }
         if self.focus == Focus::Dependencies {
             self.deps_tab = DependenciesTab::Features;
@@ -649,12 +665,35 @@ impl App {
         if len > 0 {
             *self.selected_mut(focus) = row.min(len.saturating_sub(1));
             if focus == Focus::Workspace {
-                self.dependency_selected = 0;
+                self.sync_workspace_selection();
             }
             if focus == Focus::Dependencies {
                 self.deps_tab = DependenciesTab::Features;
                 self.right_scroll = 0;
             }
+        }
+    }
+
+    fn sync_workspace_selection(&mut self) {
+        self.dependency_selected = 0;
+        self.right_scroll = 0;
+        self.deps_tab = DependenciesTab::Features;
+        self.dependency_detail = vec![format!(
+            "workspace scope changed: {}",
+            self.selected_scope_label()
+        )];
+        self.tree_detail = vec!["dependency tree not loaded for current scope".to_owned()];
+    }
+
+    fn selected_scope_label(&self) -> String {
+        if self.workspace_selected == 0 {
+            "workspace".to_owned()
+        } else {
+            self.project
+                .packages
+                .get(self.workspace_selected.saturating_sub(1))
+                .map(|package| format!("package {package}"))
+                .unwrap_or_else(|| "workspace".to_owned())
         }
     }
 
@@ -704,61 +743,177 @@ impl App {
     }
 
     fn run_cargo(&mut self, detail_focus: Focus, args: &[&str]) {
+        if self.running_child.is_some() {
+            self.message = format!("already running: {}", self.running_command);
+            return;
+        }
+
         let args = self.scoped_args(args);
         let command = format!("cargo {}", args.join(" "));
         self.command_preview = command.clone();
         self.message = format!("running: {command}");
-        self.output = vec![format!("$ {command}")];
+        self.output = vec![format!("Running: {command}...")];
         self.set_focus(detail_focus);
         if detail_focus == Focus::Build {
             self.build_tab = BuildCoreTab::LiveOutput;
         }
         self.right_scroll = 0;
 
-        let started = Instant::now();
-        let output = Command::new("cargo")
+        let (stdout_path, stderr_path) = cargo_output_paths();
+        let stdout_file = match File::create(&stdout_path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.last_status = "error".to_owned();
+                self.output = vec![format!("failed to create cargo stdout log: {error}")];
+                self.set_detail(detail_focus, self.output.clone());
+                self.message = format!("failed: {command}");
+                return;
+            }
+        };
+        let stderr_file = match File::create(&stderr_path) {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = fs::remove_file(&stdout_path);
+                self.last_status = "error".to_owned();
+                self.output = vec![format!("failed to create cargo stderr log: {error}")];
+                self.set_detail(detail_focus, self.output.clone());
+                self.message = format!("failed: {command}");
+                return;
+            }
+        };
+
+        match Command::new("cargo")
             .env("CARGO_TERM_COLOR", "always")
             .args(&args)
-            .output();
-        let duration = started.elapsed();
-
-        match output {
-            Ok(output) => {
-                let mut lines = Vec::new();
-                lines.push(format!("$ {command}"));
-                lines.push(format!("exit: {}", output.status));
-                lines.push(format!("duration: {:.2}s", duration.as_secs_f32()));
-                lines.push(String::new());
-                lines.extend(split_output(&output.stdout));
-                lines.extend(split_output(&output.stderr));
-
-                let success = output.status.success();
-                self.last_status = if success {
-                    format!("ok {:.2}s", duration.as_secs_f32())
-                } else {
-                    format!("failed {:.2}s", duration.as_secs_f32())
-                };
-                self.diagnostics = extract_diagnostics(&lines);
-                self.output = lines;
-                self.set_detail(detail_focus, self.output.clone());
-                self.history.insert(
-                    0,
-                    HistoryEntry {
-                        command: command.clone(),
-                        success,
-                        duration,
-                    },
-                );
-                self.history.truncate(20);
-                self.message = format!("finished: {command}");
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+        {
+            Ok(child) => {
+                self.running_child = Some(child);
+                self.running_command = command;
+                self.running_start = Instant::now();
+                self.running_focus = detail_focus;
+                self.running_stdout_path = Some(stdout_path);
+                self.running_stderr_path = Some(stderr_path);
             }
             Err(error) => {
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
                 self.last_status = "error".to_owned();
                 self.output = vec![format!("failed to run {command}: {error}")];
                 self.set_detail(detail_focus, self.output.clone());
                 self.diagnostics = vec![format!("runner error: {error}")];
                 self.message = format!("failed: {command}");
             }
+        }
+    }
+
+    fn poll_running_child(&mut self) {
+        let Some(child) = &mut self.running_child else {
+            return;
+        };
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let Some(child) = self.running_child.take() else {
+                    return;
+                };
+                drop(child);
+                let command = std::mem::take(&mut self.running_command);
+                let duration = self.running_start.elapsed();
+                let detail_focus = self.running_focus;
+                let stdout_path = self.running_stdout_path.take();
+                let stderr_path = self.running_stderr_path.take();
+                let stdout = self.read_running_output(stdout_path);
+                let stderr = self.read_running_output(stderr_path);
+                self.finish_cargo_output(detail_focus, command, duration, status, stdout, stderr);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.message = format!("wait failed: {error}");
+                self.last_status = "wait failed".to_owned();
+                self.running_child = None;
+                self.running_command.clear();
+                self.clear_running_output_files();
+            }
+        }
+    }
+
+    fn read_running_output(&mut self, path: Option<PathBuf>) -> Vec<u8> {
+        let Some(path) = path else {
+            return Vec::new();
+        };
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            self.diagnostics.push(format!(
+                "failed to read cargo output {}: {error}",
+                path.display()
+            ));
+            Vec::new()
+        });
+        let _ = fs::remove_file(path);
+        bytes
+    }
+
+    fn finish_cargo_output(
+        &mut self,
+        detail_focus: Focus,
+        command: String,
+        duration: Duration,
+        status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    ) {
+        let mut lines = Vec::new();
+        lines.push(format!("$ {command}"));
+        lines.push(format!("exit: {status}"));
+        lines.push(format!("duration: {:.2}s", duration.as_secs_f32()));
+        lines.push(String::new());
+        lines.extend(split_output(&stdout));
+        lines.extend(split_output(&stderr));
+
+        let success = status.success();
+        self.last_status = if success {
+            format!("ok {:.2}s", duration.as_secs_f32())
+        } else {
+            format!("failed {:.2}s", duration.as_secs_f32())
+        };
+        self.diagnostics = extract_diagnostics(&lines);
+        self.output = lines;
+        self.set_detail(detail_focus, self.output.clone());
+        self.history.insert(
+            0,
+            HistoryEntry {
+                command: command.clone(),
+                success,
+                duration,
+            },
+        );
+        self.history.truncate(20);
+        self.message = format!("finished: {command}");
+    }
+
+    fn kill_running_child(&mut self) {
+        let Some(mut child) = self.running_child.take() else {
+            return;
+        };
+
+        let _ = child.kill();
+        let _ = child.wait();
+        self.message = "killed".to_owned();
+        self.last_status = "killed".to_owned();
+        self.output = vec![format!("killed: {}", self.running_command)];
+        self.set_detail(self.running_focus, self.output.clone());
+        self.running_command.clear();
+        self.clear_running_output_files();
+    }
+
+    fn clear_running_output_files(&mut self) {
+        if let Some(path) = self.running_stdout_path.take() {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(path) = self.running_stderr_path.take() {
+            let _ = fs::remove_file(path);
         }
     }
 
@@ -861,13 +1016,7 @@ impl App {
                 self.message = format!("searched crates: {query}");
             }
             Ok(None) => {
-                let lines = vec![
-                    format!("$ {command}"),
-                    format!("duration: {:.2}s", duration.as_secs_f32()),
-                    String::new(),
-                    "cargo search timed out after 10s".to_owned(),
-                    "likely cause: crates.io, network, or proxy is unavailable".to_owned(),
-                ];
+                let lines = search_timeout_detail(&command, duration.as_secs_f32());
                 self.last_status = "search timeout".to_owned();
                 self.search.set_empty_detail(lines.clone());
                 self.package_detail = lines.clone();
@@ -885,7 +1034,7 @@ impl App {
             }
             Err(error) => {
                 self.last_status = "search error".to_owned();
-                let lines = vec![format!("failed to run {command}: {error}")];
+                let lines = search_error_detail(&command, &error.to_string());
                 self.search.set_empty_detail(lines.clone());
                 self.package_detail = lines;
                 self.output = self.package_detail.clone();
@@ -977,11 +1126,7 @@ impl App {
             command_output_with_timeout("cargo", &["info", &result.name], Duration::from_secs(8));
         let duration = started.elapsed();
 
-        let mut detail = base_search_detail(&result);
-        detail.push(String::new());
-        detail.push(format!("$ {command}"));
-        detail.push(format!("duration: {:.2}s", duration.as_secs_f32()));
-
+        let detail;
         match output {
             Ok(Some(output)) => {
                 let mut lines = split_output(&output.stdout);
@@ -992,13 +1137,20 @@ impl App {
                 } else {
                     format!("info failed {:.2}s", duration.as_secs_f32())
                 };
-                detail.push(format!("exit: {}", output.status));
-                detail.push(String::new());
                 if let Some(author) = extract_crate_author(&lines) {
-                    detail.insert(2, format!("author: {author}"));
                     self.search.set_selected_author(author);
                 }
-                detail.extend(extract_crate_info_lines(&lines));
+                detail = crate_info_detail(
+                    &result,
+                    &CrateInfoReport {
+                        command: &command,
+                        duration_secs: duration.as_secs_f32(),
+                        status: Some(output.status.to_string()),
+                        lines: &lines,
+                        timeout: false,
+                        error: None,
+                    },
+                );
                 self.output = lines;
                 self.history.insert(
                     0,
@@ -1012,12 +1164,17 @@ impl App {
             }
             Ok(None) => {
                 self.last_status = "info timeout".to_owned();
-                detail.push("cargo info timed out after 8s".to_owned());
-                detail.push(
-                    "likely cause: crates.io registry update, network, or proxy is unavailable"
-                        .to_owned(),
+                detail = crate_info_detail(
+                    &result,
+                    &CrateInfoReport {
+                        command: &command,
+                        duration_secs: duration.as_secs_f32(),
+                        status: None,
+                        lines: &[],
+                        timeout: true,
+                        error: None,
+                    },
                 );
-                detail.push("try again after fixing Cargo network/proxy settings".to_owned());
                 self.output = detail.clone();
                 self.history.insert(
                     0,
@@ -1031,7 +1188,17 @@ impl App {
             }
             Err(error) => {
                 self.last_status = "info error".to_owned();
-                detail.push(format!("failed to run cargo info: {error}"));
+                detail = crate_info_detail(
+                    &result,
+                    &CrateInfoReport {
+                        command: &command,
+                        duration_secs: duration.as_secs_f32(),
+                        status: None,
+                        lines: &[],
+                        timeout: false,
+                        error: Some(error.to_string()),
+                    },
+                );
                 self.output = detail.clone();
             }
         }
@@ -1043,19 +1210,10 @@ impl App {
     }
 
     fn open_search_link(&mut self, target: SearchLinkTarget) {
-        let url = match target {
-            SearchLinkTarget::Crates => self.search.crates_url(),
-            SearchLinkTarget::Docs => self.search.docs_url(),
-            SearchLinkTarget::Repository => self.search.repository_url(),
-        };
+        let url = self.search.url_for(target);
 
         let Some(url) = url else {
-            self.message = match target {
-                SearchLinkTarget::Repository => {
-                    "repository link unavailable; press enter to run cargo info first".to_owned()
-                }
-                _ => "no selected crate link".to_owned(),
-            };
+            self.message = SearchState::unavailable_message(target).to_owned();
             return;
         };
 
@@ -1098,7 +1256,13 @@ impl App {
 }
 
 pub fn run() -> io::Result<()> {
-    let project = ProjectInfo::load().unwrap_or_else(|_| ProjectInfo::default());
+    let project = match ProjectInfo::load() {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("FATAL: {error}");
+            std::process::exit(1);
+        }
+    };
     let mut terminal = setup_terminal()?;
     let mut app = App::new(project);
     let result = run_app(&mut terminal, &mut app);
@@ -1126,6 +1290,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
+        app.poll_running_child();
         terminal.draw(|frame| render(frame, app))?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -1382,13 +1547,16 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let offset = app
         .right_scroll
         .min(lines.len().saturating_sub(visible_rows));
-    let rendered_lines = lines
+    let rendered_lines: Vec<Line<'static>> = lines
         .iter()
         .skip(offset)
         .take(visible_rows)
-        .cloned()
-        .map(ansi_line_to_line)
-        .collect::<Vec<_>>();
+        .flat_map(|line| {
+            line.into_text()
+                .map(|text| text.lines)
+                .unwrap_or_else(|_| vec![Line::from(line.clone())])
+        })
+        .collect();
 
     let block = output_block(app, area);
     let widget = Paragraph::new(rendered_lines)
@@ -1885,353 +2053,18 @@ fn format_bytes(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-fn ansi_line_to_line(raw: String) -> Line<'static> {
-    if !raw.contains("\x1b[") {
-        return semantic_line(raw);
-    }
-
-    let mut spans = Vec::new();
-    let mut buffer = String::new();
-    let mut style = Style::default();
-    let mut chars = raw.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            let mut sequence = String::new();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    if next == 'm' {
-                        flush_ansi_buffer(&mut spans, &mut buffer, style);
-                        apply_sgr_sequence(&sequence, &mut style);
-                    }
-                    break;
-                }
-                sequence.push(next);
-            }
-        } else {
-            buffer.push(ch);
-        }
-    }
-
-    flush_ansi_buffer(&mut spans, &mut buffer, style);
-    Line::from(spans)
-}
-
-fn semantic_line(raw: String) -> Line<'static> {
-    let trimmed = raw.trim();
-    let lower = trimmed.to_lowercase();
-
-    if trimmed.is_empty() {
-        return Line::from(String::new());
-    }
-
-    if let Some(line) = feature_state_line(&raw) {
-        return line;
-    }
-
-    let style = if lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("exit: exit status")
-    {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-    } else if lower.contains("warning") || lower.contains("unused") {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else if lower.starts_with("project health")
-        || lower == "disk"
-        || lower == "hot paths"
-        || lower == "workspace scope"
-        || lower == "health snapshot"
-        || lower == "package identity"
-        || lower == "targets"
-        || lower == "dependencies"
-        || lower == "feature state"
-        || lower == "local path"
-        || lower == "actions"
-        || lower == "build"
-        || lower == "cargo metrics"
-    {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else if lower.starts_with("rustc:")
-        || lower.contains("target total:")
-        || lower.contains("source size:")
-        || lower.contains("crate cache estimate:")
-        || lower.starts_with("duration:")
-    {
-        Style::default().fg(Color::Cyan)
-    } else if lower.starts_with("ok ") || lower.contains("exit: exit status: 0") {
-        Style::default().fg(Color::Green)
-    } else if lower.starts_with("compiling")
-        || lower.starts_with("checking")
-        || lower.starts_with("finished")
-        || lower.starts_with("running")
-    {
-        Style::default().fg(Color::Blue)
-    } else if lower.starts_with('$') {
-        Style::default().fg(Color::Magenta)
-    } else {
-        Style::default()
-    };
-
-    Line::from(Span::styled(raw, style))
-}
-
-fn feature_state_line(raw: &str) -> Option<Line<'static>> {
-    let marker_index = raw.find('[')?;
-    let marker = raw.get(marker_index..marker_index.saturating_add(3))?;
-    let style = match marker {
-        "[x]" => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        "[-]" => Style::default().fg(Color::Yellow),
-        "[ ]" => Style::default().fg(Color::DarkGray),
-        _ => return None,
-    };
-    Some(Line::from(vec![
-        Span::raw(raw[..marker_index].to_owned()),
-        Span::styled(marker.to_owned(), style),
-        Span::styled(raw[marker_index + 3..].to_owned(), style),
-    ]))
-}
-
-fn flush_ansi_buffer(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Style) {
-    if !buffer.is_empty() {
-        spans.push(Span::styled(std::mem::take(buffer), style));
-    }
-}
-
-fn apply_sgr_sequence(sequence: &str, style: &mut Style) {
-    let codes = if sequence.is_empty() {
-        vec![0]
-    } else {
-        sequence
-            .split(';')
-            .filter_map(|part| part.parse::<u16>().ok())
-            .collect::<Vec<_>>()
-    };
-
-    if codes.is_empty() {
-        return;
-    }
-
-    for code in codes {
-        match code {
-            0 => *style = Style::default(),
-            1 => style.add_modifier |= Modifier::BOLD,
-            3 => style.add_modifier |= Modifier::ITALIC,
-            4 => style.add_modifier |= Modifier::UNDERLINED,
-            22 => *style = style.remove_modifier(Modifier::BOLD),
-            23 => *style = style.remove_modifier(Modifier::ITALIC),
-            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
-            30..=37 | 90..=97 => *style = style.fg(ansi_color(code)),
-            39 => *style = Style { fg: None, ..*style },
-            40..=47 | 100..=107 => *style = style.bg(ansi_color(code - 10)),
-            49 => *style = Style { bg: None, ..*style },
-            _ => {}
-        }
-    }
-}
-
-fn ansi_color(code: u16) -> Color {
-    match code {
-        30 => Color::Indexed(0),
-        31 => Color::Indexed(1),
-        32 => Color::Indexed(2),
-        33 => Color::Indexed(3),
-        34 => Color::Indexed(4),
-        35 => Color::Indexed(5),
-        36 => Color::Indexed(6),
-        37 => Color::Indexed(7),
-        90 => Color::Indexed(8),
-        91 => Color::Indexed(9),
-        92 => Color::Indexed(10),
-        93 => Color::Indexed(11),
-        94 => Color::Indexed(12),
-        95 => Color::Indexed(13),
-        96 => Color::Indexed(14),
-        97 => Color::Indexed(15),
-        _ => Color::Reset,
-    }
-}
-
-fn split_output(bytes: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .map(str::to_owned)
-        .collect()
-}
-
-fn extract_diagnostics(lines: &[String]) -> Vec<String> {
-    lines
-        .iter()
-        .filter(|line| {
-            let lower = line.to_lowercase();
-            lower.contains("error")
-                || lower.contains("warning")
-                || lower.contains("failed")
-                || lower.contains("unused")
-        })
-        .cloned()
-        .collect()
-}
-
-fn command_output_with_timeout(
-    program: &str,
-    args: &[&str],
-    timeout: Duration,
-) -> io::Result<Option<Output>> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let started = Instant::now();
-
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(Some);
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn first_url(line: &str) -> Option<&str> {
-    line.split_whitespace()
-        .find(|part| part.starts_with("http://") || part.starts_with("https://"))
-}
-
-fn open_url(url: &str) -> io::Result<()> {
-    for mut command in open_url_commands(url) {
-        let result = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        if result.is_ok() {
-            return Ok(());
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "no supported URL opener found",
-    ))
-}
-
-fn copy_to_clipboard(text: &str) -> io::Result<()> {
-    if pipe_to_command("wl-copy", &[], text).is_ok()
-        || pipe_to_command("xclip", &["-selection", "clipboard"], text).is_ok()
-        || pipe_to_command("xsel", &["--clipboard", "--input"], text).is_ok()
-        || copy_to_terminal_osc52(text).is_ok()
-    {
-        return Ok(());
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "no clipboard provider found",
-    ))
-}
-
-fn pipe_to_command(program: &str, args: &[&str], text: &str) -> io::Result<()> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(text.as_bytes())?;
-    }
-    let status = child.wait()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("clipboard command failed"))
-    }
-}
-
-fn copy_to_terminal_osc52(text: &str) -> io::Result<()> {
-    let encoded = base64_encode(text.as_bytes());
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b]52;c;{encoded}\x07")?;
-    stdout.flush()
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = *chunk.get(1).unwrap_or(&0);
-        let b2 = *chunk.get(2).unwrap_or(&0);
-
-        output.push(TABLE[(b0 >> 2) as usize] as char);
-        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            output.push('=');
-        }
-        if chunk.len() > 2 {
-            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
-        } else {
-            output.push('=');
-        }
-    }
-
-    output
-}
-
-#[cfg(target_os = "linux")]
-fn open_url_commands(url: &str) -> Vec<Command> {
-    let mut commands = Vec::new();
-
-    let mut xdg = Command::new("xdg-open");
-    xdg.arg(url);
-    commands.push(xdg);
-
-    let mut gio = Command::new("gio");
-    gio.args(["open", url]);
-    commands.push(gio);
-
-    let mut wslview = Command::new("wslview");
-    wslview.arg(url);
-    commands.push(wslview);
-
-    commands
-}
-
-#[cfg(target_os = "macos")]
-fn open_url_commands(url: &str) -> Vec<Command> {
-    let mut command = Command::new("open");
-    command.arg(url);
-    vec![command]
-}
-
-#[cfg(target_os = "windows")]
-fn open_url_commands(url: &str) -> Vec<Command> {
-    let mut command = Command::new("cmd");
-    command.args(["/C", "start", "", url]);
-    vec![command]
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn open_url_commands(_url: &str) -> Vec<Command> {
-    Vec::new()
+fn cargo_output_paths() -> (PathBuf, PathBuf) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let pid = std::process::id();
+    let base = format!("lazycargo-{pid}-{stamp}");
+    let dir = std::env::temp_dir();
+    (
+        dir.join(format!("{base}.stdout")),
+        dir.join(format!("{base}.stderr")),
+    )
 }
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {

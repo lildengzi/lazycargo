@@ -11,6 +11,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 serde = { version = "1.0.228", features = ["derive"] }

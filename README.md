@@ -29,13 +29,15 @@ Implemented:
 - Clickable crates.io/docs/repository links when available.
 - Terminal copy mode with `m`, which releases mouse capture so visible text can be selected by the terminal.
 - Clipboard copy for search detail with `y`.
+- Non-blocking core Cargo actions for `check`, `build`, `test`, `run`, `tree`, and related Build Core tasks. The TUI remains responsive while the command is running, and output is shown when the command finishes.
+- Startup failure reporting outside Cargo projects. Running in a directory without `Cargo.toml` exits with a clear `FATAL: cargo metadata failed...` message instead of opening an empty dashboard.
 
 Not implemented yet:
 
 - Structured interactive dependency graph nodes.
 - Click-to-expand dependency tree.
 - Conflict path highlighting.
-- Streaming subprocess output while Cargo is still running.
+- True streaming subprocess output while Cargo is still running. Core commands are non-blocking, but their full log is rendered after process completion.
 
 ## Install / Run
 
@@ -117,6 +119,32 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test
 cargo build --release
 ```
+
+Manual MVP smoke test:
+
+```bash
+cargo build --workspace --release
+./target/release/lazycargo
+```
+
+Inside the TUI:
+
+- Press `c` and confirm `cargo check` runs without freezing navigation.
+- While `cargo check` is running, switch focus with `1`, `2`, `3`, `0`, and switch right tabs with `[` / `]`.
+- Press `Ctrl+C` during a long-running Cargo task and confirm the task is killed.
+- Press `b` and confirm build output appears in `Live Output` after completion.
+- Press `t` and `i` from the dependency area and confirm dependency tree output appears.
+- Press `s`, search for a crate, inspect it with `Enter`, and try `o` / `d` / `g` links.
+- Press `m` and confirm terminal text selection works, then press `m` again to restore mouse interaction.
+
+Outside a Cargo project:
+
+```bash
+cd /tmp
+/path/to/lazycargo
+```
+
+Expected result: the program exits before opening the TUI and prints a `FATAL: cargo metadata failed...` message.
 
 ## Product Notes
 

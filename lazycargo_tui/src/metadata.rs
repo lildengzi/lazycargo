@@ -1,7 +1,18 @@
-use std::io;
+use std::fmt;
 use std::process::Command;
 
-use serde::Deserialize;
+use cargo_metadata::{DependencyKind as CargoDependencyKind, MetadataCommand, Package, Resolve};
+
+#[derive(Debug)]
+pub struct MetadataLoadError(String);
+
+impl fmt::Display for MetadataLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MetadataLoadError {}
 
 #[derive(Debug, Clone, Default)]
 pub struct ProjectInfo {
@@ -73,52 +84,48 @@ impl DependencyKind {
 }
 
 impl ProjectInfo {
-    pub fn load() -> io::Result<Self> {
-        let output = Command::new("cargo")
-            .args(["metadata", "--format-version", "1"])
-            .output()?;
+    pub fn load() -> Result<Self, MetadataLoadError> {
+        let metadata = MetadataCommand::new()
+            .exec()
+            .map_err(|error| MetadataLoadError(format!("cargo metadata failed: {error}")))?;
 
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::other(format!("cargo metadata failed: {error}")));
+        if metadata.workspace_members.is_empty() {
+            return Err(MetadataLoadError("no workspace members".to_owned()));
         }
-
-        let metadata =
-            serde_json::from_slice::<CargoMetadata>(&output.stdout).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("failed to parse cargo metadata: {error}"),
-                )
-            })?;
+        let workspace_member_ids = metadata
+            .workspace_members
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
 
         let workspace_packages = metadata
             .packages
             .iter()
-            .filter(|package| metadata.workspace_members.contains(&package.id))
+            .filter(|package| workspace_member_ids.contains(&package.id.to_string()))
             .map(package_info)
             .collect::<Vec<_>>();
 
-        let Some(root_package) = workspace_packages.first() else {
-            return Ok(Self::default());
-        };
+        let root_package = workspace_packages
+            .first()
+            .ok_or_else(|| MetadataLoadError("no workspace packages".to_owned()))?;
 
         let dependency_packages = metadata
             .packages
             .iter()
-            .filter(|package| !metadata.workspace_members.contains(&package.id))
+            .filter(|package| !workspace_member_ids.contains(&package.id.to_string()))
             .map(|package| PackageFeatureInfo {
-                id: package.id.clone(),
+                id: package.id.to_string(),
                 name: package.name.clone(),
-                version: package.version.clone(),
+                version: package.version.to_string(),
                 features: sorted_features(&package.features),
-                enabled_features: resolved_features(&metadata, &package.id),
+                enabled_features: enabled_features_for(metadata.resolve.as_ref(), &package.id),
             })
             .collect::<Vec<_>>();
 
         Ok(Self {
             name: root_package.name.clone(),
             version: root_package.version.clone(),
-            workspace_root: metadata.workspace_root,
+            workspace_root: metadata.workspace_root.to_string(),
             manifest_path: root_package.manifest_path.clone(),
             packages: workspace_packages
                 .iter()
@@ -134,67 +141,22 @@ impl ProjectInfo {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CargoMetadata {
-    packages: Vec<CargoPackage>,
-    workspace_root: String,
-    workspace_members: Vec<String>,
-    resolve: Option<CargoResolve>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoPackage {
-    id: String,
-    name: String,
-    version: String,
-    rust_version: Option<String>,
-    dependencies: Vec<CargoDependency>,
-    targets: Vec<CargoTarget>,
-    features: std::collections::BTreeMap<String, Vec<String>>,
-    manifest_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoDependency {
-    name: String,
-    req: String,
-    kind: Option<String>,
-    features: Vec<String>,
-    optional: bool,
-    uses_default_features: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoTarget {
-    name: String,
-    kind: Vec<String>,
-    src_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoResolve {
-    nodes: Vec<CargoResolveNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CargoResolveNode {
-    id: String,
-    features: Vec<String>,
-}
-
-fn package_info(package: &CargoPackage) -> PackageInfo {
+fn package_info(package: &Package) -> PackageInfo {
     PackageInfo {
         name: package.name.clone(),
-        version: package.version.clone(),
-        manifest_path: package.manifest_path.clone(),
-        rust_version: package.rust_version.clone(),
+        version: package.version.to_string(),
+        manifest_path: package.manifest_path.to_string(),
+        rust_version: package
+            .rust_version
+            .as_ref()
+            .map(std::string::ToString::to_string),
         targets: package
             .targets
             .iter()
             .map(|target| TargetInfo {
                 name: target.name.clone(),
-                kind: target.kind.clone(),
-                src_path: target.src_path.clone(),
+                kind: target.kind.iter().map(ToString::to_string).collect(),
+                src_path: target.src_path.to_string(),
             })
             .collect(),
         dependencies: package
@@ -202,10 +164,10 @@ fn package_info(package: &CargoPackage) -> PackageInfo {
             .iter()
             .map(|dependency| DependencyInfo {
                 name: dependency.name.clone(),
-                req: dependency.req.clone(),
-                kind: match dependency.kind.as_deref() {
-                    Some("dev") => DependencyKind::Dev,
-                    Some("build") => DependencyKind::Build,
+                req: dependency.req.to_string(),
+                kind: match dependency.kind {
+                    CargoDependencyKind::Development => DependencyKind::Dev,
+                    CargoDependencyKind::Build => DependencyKind::Build,
                     _ => DependencyKind::Normal,
                 },
                 features: dependency.features.clone(),
@@ -217,11 +179,12 @@ fn package_info(package: &CargoPackage) -> PackageInfo {
     }
 }
 
-fn resolved_features(metadata: &CargoMetadata, package_id: &str) -> Vec<String> {
-    let mut features = metadata
-        .resolve
-        .as_ref()
-        .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == package_id))
+fn enabled_features_for(
+    resolve: Option<&Resolve>,
+    package_id: &cargo_metadata::PackageId,
+) -> Vec<String> {
+    let mut features = resolve
+        .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == *package_id))
         .map(|node| node.features.clone())
         .unwrap_or_default();
     features.sort();

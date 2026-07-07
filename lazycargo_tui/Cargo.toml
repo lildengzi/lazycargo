@@ -6,8 +6,13 @@ description = "A project-focused Cargo management TUI."
 license.workspace = true
 
 [dependencies]
+ansi-to-tui = "8.0"
+arboard = "3.4"
+base64.workspace = true
+cargo_metadata = "0.19"
 crossterm.workspace = true
 lazycargo_search = { path = "../lazycargo_search" }
+open = "5.3"
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

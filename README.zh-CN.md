@@ -27,13 +27,15 @@
 - 支持打开 crates.io / docs / repository 链接。
 - `m` 进入终端复制模式，释放鼠标捕获，方便直接拖选可见文本。
 - `y` 复制搜索详情。
+- 核心 Cargo 动作已经非阻塞，包括 `check`、`build`、`test`、`run`、`tree` 和 Build Core 里的相关任务。命令执行时 TUI 仍然可以移动焦点、切换面板，命令结束后显示完整输出。
+- 非 Cargo 项目目录启动时会直接打印明确的 `FATAL: cargo metadata failed...` 错误并退出，不再打开空面板。
 
 尚未完成：
 
 - 结构化的交互式依赖图节点。
 - 点击展开/折叠依赖树。
 - 依赖冲突路径高亮。
-- Cargo 子进程运行中的真正实时流式输出。
+- Cargo 子进程运行中的真正实时流式输出。当前核心命令已经非阻塞，但完整日志会在进程结束后渲染。
 
 ## 安装与运行
 
@@ -115,6 +117,32 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo build --workspace --release
 ```
+
+MVP 手动冒烟测试：
+
+```bash
+cargo build --workspace --release
+./target/release/lazycargo
+```
+
+进入 TUI 后：
+
+- 按 `c`，确认 `cargo check` 执行时界面不会卡死。
+- `cargo check` 运行期间，用 `1`、`2`、`3`、`0` 切换焦点，用 `[` / `]` 切换右侧标签。
+- 长任务运行期间按 `Ctrl+C`，确认当前 Cargo 子进程会被杀掉。
+- 按 `b`，确认 build 结束后输出出现在 `Live Output`。
+- 在依赖区域按 `t` 和 `i`，确认依赖树输出正常出现。
+- 按 `s` 搜索 crate，选中结果后按 `Enter` 查看详情，再尝试 `o` / `d` / `g` 打开链接。
+- 按 `m`，确认可以用终端直接拖选文字；再按一次 `m` 恢复鼠标交互。
+
+在非 Cargo 项目目录：
+
+```bash
+cd /tmp
+/path/to/lazycargo
+```
+
+预期结果：程序在打开 TUI 前退出，并打印 `FATAL: cargo metadata failed...`。
 
 ## 产品方向
 
