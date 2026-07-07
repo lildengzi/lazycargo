@@ -180,13 +180,6 @@ The most important Rust-specific pain points are:
 - Understanding which dependency features are enabled and why.
 - Finding who pulled a dependency into the project with `cargo tree -i`.
 
-## Support
-
-If `lazycargo` helps your Rust workflow, consider supporting development:
-
-- GitHub Sponsors: https://github.com/sponsors/lildengzi
-- More options: [docs/sponsor.md](docs/sponsor.md)
-
 ## License
 
 MIT

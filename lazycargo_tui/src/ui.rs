@@ -149,8 +149,6 @@ impl ContextTab {
 }
 
 struct UiText {
-    donate_label: &'static str,
-    donate_url: &'static str,
     keys_title: &'static str,
     version_label: &'static str,
     status_label: &'static str,
@@ -159,8 +157,6 @@ struct UiText {
 
 fn ui_text() -> UiText {
     UiText {
-        donate_label: "Donate",
-        donate_url: "https://github.com/sponsors/lildengzi",
         keys_title: "Keys",
         version_label: "Version",
         status_label: "status",
@@ -1778,22 +1774,7 @@ fn update_embedded_tab_areas(app: &mut App, area: Rect) {
 fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
     let text = ui_text();
     let area = centered_rect(70, 64, frame.area());
-    let version = env!("CARGO_PKG_VERSION");
     let lines = key_dialog_lines(app);
-    let donate_prefix = format!(
-        "{}  {version}    {}  ",
-        text.version_label, text.donate_label
-    );
-    let donate_line = lines.len().saturating_sub(2) as u16;
-    app.link_areas.push((
-        Rect {
-            x: area.x.saturating_add(1 + donate_prefix.len() as u16),
-            y: area.y.saturating_add(1 + donate_line),
-            width: text.donate_label.len() as u16,
-            height: 1,
-        },
-        text.donate_url.to_owned(),
-    ));
     let widget = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
@@ -1863,17 +1844,6 @@ fn key_dialog_lines(app: &App) -> Vec<Line<'static>> {
             ),
             Span::raw(version.to_owned()),
             Span::raw("    "),
-            Span::styled(
-                format!("{}  ", text.donate_label),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(
-                text.donate_label,
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-            Span::raw("    "),
             Span::styled(text.close_keys, Style::default().fg(Color::Green)),
             Span::raw(" close"),
         ]),
@@ -1895,22 +1865,11 @@ fn key_line(key: &'static str, label: &'static str) -> Line<'static> {
 }
 
 fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let text = ui_text();
-    let donate_width = text.donate_label.len() as u16;
     let version_text = format!(" v{}", env!("CARGO_PKG_VERSION"));
     let version_width = version_text.len() as u16;
-    let donate_x = area
+    let version_x = area
         .x
-        .saturating_add(area.width.saturating_sub(donate_width + version_width));
-    app.link_areas.push((
-        Rect {
-            x: donate_x,
-            y: area.y,
-            width: donate_width,
-            height: 1,
-        },
-        text.donate_url.to_owned(),
-    ));
+        .saturating_add(area.width.saturating_sub(version_width));
 
     let line = match app.input_mode {
         InputMode::CrateSearch => Line::from(vec![
@@ -1978,21 +1937,15 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
 
     frame.render_widget(Paragraph::new(line), area);
-    let donate_line = Line::from(vec![
-        Span::styled(
-            text.donate_label,
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::UNDERLINED),
-        ),
-        Span::styled(version_text, Style::default().fg(Color::Green)),
-    ]);
     frame.render_widget(
-        Paragraph::new(donate_line),
+        Paragraph::new(Line::from(Span::styled(
+            version_text,
+            Style::default().fg(Color::Green),
+        ))),
         Rect {
-            x: donate_x,
+            x: version_x,
             y: area.y,
-            width: donate_width + version_width,
+            width: version_width,
             height: 1,
         },
     );

@@ -178,13 +178,6 @@ cd /tmp
 - 看清某个依赖的 feature 到底有没有开启，以及为什么开启。
 - 通过 `cargo tree -i` 快速定位“是谁把这个依赖带进来的”。
 
-## 支持项目
-
-如果 `lazycargo` 对你的 Rust 开发有帮助，可以自愿支持后续开发：
-
-- GitHub Sponsors: https://github.com/sponsors/lildengzi
-- 更多方式：[docs/sponsor.md](docs/sponsor.md)
-
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
