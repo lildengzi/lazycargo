@@ -2,6 +2,8 @@ use std::fs::{self, File};
 use std::io;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ansi_to_tui::IntoText as _;
@@ -18,7 +20,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
 use ratatui::{Frame, Terminal};
@@ -165,6 +167,7 @@ struct PackageDiskInfo {
 struct App {
     project: ProjectInfo,
     disk: DiskSnapshot,
+    disk_receiver: Option<Receiver<DiskSnapshot>>,
     focus: Focus,
     current_focus: FocusPanel,
     input_mode: InputMode,
@@ -208,11 +211,13 @@ struct App {
 impl App {
     fn new(project: ProjectInfo) -> Self {
         let command_preview = "cargo check".to_owned();
-        let disk = DiskSnapshot::load(&project);
+        let disk = DiskSnapshot::pending(&project);
+        let disk_receiver = Some(DiskSnapshot::load_async(project.clone()));
         let output = project_health_snapshot(&project, &disk);
         Self {
             project,
             disk,
+            disk_receiver,
             focus: Focus::Workspace,
             current_focus: FocusPanel::Workspace,
             input_mode: InputMode::Normal,
@@ -265,6 +270,20 @@ impl App {
             InputMode::Normal => self.handle_normal_key(key),
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::CrateSearch => self.handle_crate_search_key(key),
+        }
+    }
+
+    fn poll_disk_snapshot(&mut self) {
+        let Some(receiver) = &self.disk_receiver else {
+            return;
+        };
+        let Ok(snapshot) = receiver.try_recv() else {
+            return;
+        };
+        self.disk = snapshot;
+        self.disk_receiver = None;
+        if self.last_status == "ready" {
+            self.last_status = "disk snapshot ready".to_owned();
         }
     }
 
@@ -1003,7 +1022,6 @@ impl App {
                     self.search.set_empty_detail(lines.clone());
                 }
                 self.package_detail = lines.clone();
-                self.output = lines;
                 self.history.insert(
                     0,
                     HistoryEntry {
@@ -1020,7 +1038,6 @@ impl App {
                 self.last_status = "search timeout".to_owned();
                 self.search.set_empty_detail(lines.clone());
                 self.package_detail = lines.clone();
-                self.output = lines;
                 self.history.insert(
                     0,
                     HistoryEntry {
@@ -1037,7 +1054,6 @@ impl App {
                 let lines = search_error_detail(&command, &error.to_string());
                 self.search.set_empty_detail(lines.clone());
                 self.package_detail = lines;
-                self.output = self.package_detail.clone();
                 self.message = format!("crate search failed: {query}");
             }
         }
@@ -1151,7 +1167,6 @@ impl App {
                         error: None,
                     },
                 );
-                self.output = lines;
                 self.history.insert(
                     0,
                     HistoryEntry {
@@ -1175,7 +1190,6 @@ impl App {
                         error: None,
                     },
                 );
-                self.output = detail.clone();
                 self.history.insert(
                     0,
                     HistoryEntry {
@@ -1199,7 +1213,6 @@ impl App {
                         error: Some(error.to_string()),
                     },
                 );
-                self.output = detail.clone();
             }
         }
 
@@ -1290,6 +1303,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
+        app.poll_disk_snapshot();
         app.poll_running_child();
         terminal.draw(|frame| render(frame, app))?;
 
@@ -1616,18 +1630,15 @@ fn embedded_tab_title(app: &App) -> Line<'static> {
     for (index, tab) in app.active_context_tabs().into_iter().enumerate() {
         let style = if tab == app.active_context_tab() {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default()
         };
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{}] {}", index + 1, tab.label()),
-            style,
-        ));
-        spans.push(Span::raw(" "));
+        if index > 0 {
+            spans.push(Span::styled(" - ", Style::default()));
+        }
+        spans.push(Span::styled(tab.label(), style));
     }
     if app.copy_mode {
         spans.push(Span::styled(
@@ -1644,7 +1655,10 @@ fn update_embedded_tab_areas(app: &mut App, area: Rect) {
         .x
         .saturating_add(1 + app.current_focus.title().len() as u16 + 2);
     for (index, tab) in app.active_context_tabs().into_iter().enumerate() {
-        let width = format!("[{}] {}", index + 1, tab.label()).len() as u16 + 2;
+        if index > 0 {
+            x = x.saturating_add(3);
+        }
+        let width = tab.label().len() as u16;
         if x >= area.x.saturating_add(area.width) {
             break;
         }
@@ -1664,17 +1678,19 @@ fn update_embedded_tab_areas(app: &mut App, area: Rect) {
 fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(70, 64, frame.area());
     let version = env!("CARGO_PKG_VERSION");
+    let lines = key_dialog_lines(app);
     let donate_prefix = format!("Version  {version}    Donate  ");
+    let donate_line = lines.len().saturating_sub(2) as u16;
     app.link_areas.push((
         Rect {
             x: area.x.saturating_add(1 + donate_prefix.len() as u16),
-            y: area.y.saturating_add(23),
+            y: area.y.saturating_add(1 + donate_line),
             width: "Bilibili".len() as u16,
             height: 1,
         },
         "https://www.bilibili.com".to_owned(),
     ));
-    let widget = Paragraph::new(key_dialog_lines(app)).block(
+    let widget = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
                 "Keys",
@@ -1686,6 +1702,7 @@ fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Green)),
     );
+    frame.render_widget(Clear, area);
     frame.render_widget(widget, area);
 }
 
@@ -1764,12 +1781,14 @@ fn key_line(key: &'static str, label: &'static str) -> Line<'static> {
 }
 
 fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    const DONATE_URL: &str = "https://www.bilibili.com";
-    let donate_text = "Donate: Bilibili";
+    const DONATE_URL: &str = "https://github.com/sponsors/lildengzi";
+    let donate_text = "Donate";
     let donate_width = donate_text.len() as u16;
+    let version_text = format!(" v{}", env!("CARGO_PKG_VERSION"));
+    let version_width = version_text.len() as u16;
     let donate_x = area
         .x
-        .saturating_add(area.width.saturating_sub(donate_width));
+        .saturating_add(area.width.saturating_sub(donate_width + version_width));
     app.link_areas.push((
         Rect {
             x: donate_x,
@@ -1859,20 +1878,20 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Paragraph::new(line), area);
     let donate_line = Line::from(vec![
-        Span::styled("Donate: ", Style::default().fg(Color::Yellow)),
         Span::styled(
-            "Bilibili",
+            donate_text,
             Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::UNDERLINED),
         ),
+        Span::styled(version_text, Style::default().fg(Color::Green)),
     ]);
     frame.render_widget(
         Paragraph::new(donate_line),
         Rect {
             x: donate_x,
             y: area.y,
-            width: donate_width,
+            width: donate_width + version_width,
             height: 1,
         },
     );
@@ -1923,6 +1942,30 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 impl DiskSnapshot {
+    fn pending(project: &ProjectInfo) -> Self {
+        let packages = project
+            .workspace_packages
+            .iter()
+            .map(|package| PackageDiskInfo {
+                name: package.name.clone(),
+                source_size: "calculating...".to_owned(),
+                target_cache: "calculating...".to_owned(),
+            })
+            .collect();
+        Self {
+            target_size: "calculating...".to_owned(),
+            packages,
+        }
+    }
+
+    fn load_async(project: ProjectInfo) -> Receiver<Self> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(Self::load(&project));
+        });
+        rx
+    }
+
     fn load(project: &ProjectInfo) -> Self {
         let target_size = target_dir_size_label(project);
         let packages = project
