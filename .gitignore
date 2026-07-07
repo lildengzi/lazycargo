@@ -1,0 +1,36 @@
+/target/
+**/*.rs.bk
+
+# Local agent / tool state
+/.agents/
+/.codex/
+
+# Local-only GitHub workflow drafts
+/.github/workflows/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Local environment
+.env
+.env.*
+
+# Generated archives / release outputs
+*.tar.gz
+*.zip
+*.7z
+dist/
+release/

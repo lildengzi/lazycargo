@@ -1,0 +1,17 @@
+[package]
+name = "lazycargo"
+version.workspace = true
+edition.workspace = true
+description = "A project-focused Cargo management TUI."
+license.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+lazycargo_search = { path = "../lazycargo_search" }
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "lazycargo"
+path = "src/main.rs"

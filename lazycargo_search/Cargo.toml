@@ -1,0 +1,8 @@
+[package]
+name = "lazycargo_search"
+version.workspace = true
+edition.workspace = true
+description = "Crates.io search state and parsing for lazycargo."
+license.workspace = true
+
+[dependencies]
