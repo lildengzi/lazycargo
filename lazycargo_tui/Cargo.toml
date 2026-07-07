@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 description = "A project-focused Cargo management TUI."
 license.workspace = true
+readme = "../README.md"
+repository = "https://github.com/lildengzi/lazycargo"
+homepage = "https://github.com/lildengzi/lazycargo"
+keywords = ["cargo", "tui", "rust", "workspace"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 ansi-to-tui = "8.0"
@@ -11,7 +16,7 @@ arboard = "3.4"
 base64.workspace = true
 cargo_metadata = "0.19"
 crossterm.workspace = true
-lazycargo_search = { path = "../lazycargo_search" }
+lazycargo_search = { path = "../lazycargo_search", version = "0.1.0" }
 open = "5.3"
 ratatui.workspace = true
 serde.workspace = true

@@ -2,9 +2,31 @@
 
 [中文说明](README.zh-CN.md)
 
+<p align="center">
+  <img src="docs/pics/ProjectsIcon.png" alt="lazycargo project icon" width="128">
+</p>
+
 `lazycargo` is a Rust project management TUI for inspecting a Cargo workspace without leaving the terminal.
 
 It is not meant to be a thin wrapper around `cargo build` or `cargo test`. The goal is to make the surrounding project context easier to see: package scope, dependency features, dependency trees, command output, build history, disk usage, and crates.io search.
+
+## Screenshots
+
+The main workspace keeps project scope, build actions, dependency state, and long-form output visible in one terminal workspace.
+
+![Main workspace](docs/pics/mainpage.png)
+
+Feature state and dependency detail views make Cargo feature resolution easier to inspect without leaving the terminal.
+
+![Feature state](docs/pics/Features.png)
+
+Dependency tree and inverse tree output are kept in the right-side waterfall pane for focused debugging.
+
+![Dependency tree](docs/pics/Dependencies.png)
+
+The crates.io search page provides a pacseek-style flow for finding packages, inspecting metadata, and opening docs or repository links.
+
+![Crates search](docs/pics/Searchpage.png)
 
 ## Current Status
 
@@ -15,6 +37,7 @@ Implemented:
 - `lazygit` / `lazydocker` style TUI layout.
 - Workspace/package scope panel.
 - Build Core panel for `check`, `build`, `test`, `run`, `clippy`, `doc`, `update`, `clean`, and `build --timings`.
+- `cargo new <name>` from the Build Core panel through a small status-line input mode.
 - Dependencies panel with direct dependency metadata and feature state markers:
   - `[x]` explicitly/default enabled
   - `[-]` enabled through Cargo resolution
@@ -30,7 +53,7 @@ Implemented:
 - Terminal copy mode with `m`, which releases mouse capture so visible text can be selected by the terminal.
 - Clipboard copy for search detail with `y`.
 - Non-blocking core Cargo actions for `check`, `build`, `test`, `run`, `tree`, and related Build Core tasks. The TUI remains responsive while the command is running, and output is shown when the command finishes.
-- Startup failure reporting outside Cargo projects. Running in a directory without `Cargo.toml` exits with a clear `FATAL: cargo metadata failed...` message instead of opening an empty dashboard.
+- Limited mode outside Cargo projects. Running in a directory without `Cargo.toml` still opens the TUI so `cargo new <name>` can be used.
 
 Not implemented yet:
 
@@ -71,6 +94,7 @@ Main dashboard:
 - `PgUp/PgDn`: scroll the right pane.
 - `c`: run `cargo check`.
 - `b`: run `cargo build`.
+- Select `new project` in Build Core and press `Enter`: type a project name, then press `Enter` to run `cargo new <name>`.
 - `t`: run `cargo tree`.
 - `i`: run `cargo tree -i <selected dependency>`.
 - `s`: open crates.io search page.
@@ -144,7 +168,7 @@ cd /tmp
 /path/to/lazycargo
 ```
 
-Expected result: the program exits before opening the TUI and prints a `FATAL: cargo metadata failed...` message.
+Expected result: the TUI opens in limited mode. Use `Build Core -> new project` to create a Cargo project from that directory.
 
 ## Product Notes
 

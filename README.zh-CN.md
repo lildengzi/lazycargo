@@ -1,8 +1,30 @@
 # lazycargo
 
+<p align="center">
+  <img src="docs/pics/ProjectsIcon.png" alt="lazycargo 项目图标" width="128">
+</p>
+
 `lazycargo` 是一个面向 Rust 项目的终端 TUI 工作台，用来在不离开终端的情况下查看和管理 Cargo workspace。
 
 它不是简单的 `cargo build` / `cargo test` 命令包装器。它的重点是把日常开发里难以扫清的上下文集中展示出来：当前 package 作用域、依赖 features、依赖树、命令输出、构建历史、磁盘占用和 crates.io 搜索。
+
+## 界面预览
+
+主工作台在一个终端界面里集中展示项目作用域、构建动作、依赖状态和右侧长输出。
+
+![主工作台](docs/pics/mainpage.png)
+
+Features 视图用于查看依赖 feature 的启用状态，减少在 Cargo.toml、文档和命令输出之间来回切换。
+
+![Feature 状态](docs/pics/Features.png)
+
+Dependency Tree 视图保留 `cargo tree` 和 `cargo tree -i` 输出，方便定位依赖来源。
+
+![依赖树](docs/pics/Dependencies.png)
+
+crates.io 搜索页提供类似 pacseek 的包搜索、元数据查看和链接跳转流程。
+
+![包搜索](docs/pics/Searchpage.png)
 
 ## 当前状态
 
@@ -13,6 +35,7 @@
 - 类似 `lazygit` / `lazydocker` 的紧凑 TUI 布局。
 - Workspace / package 作用域面板。
 - Build Core 面板，支持 `check`、`build`、`test`、`run`、`clippy`、`doc`、`update`、`clean`、`build --timings`。
+- Build Core 支持 `cargo new <name>`，通过底部状态栏输入项目名后创建新项目。
 - Dependencies 面板，展示直接依赖元数据和 feature 状态：
   - `[x]` 显式或默认启用
   - `[-]` 由 Cargo resolve 结果启用
@@ -28,7 +51,7 @@
 - `m` 进入终端复制模式，释放鼠标捕获，方便直接拖选可见文本。
 - `y` 复制搜索详情。
 - 核心 Cargo 动作已经非阻塞，包括 `check`、`build`、`test`、`run`、`tree` 和 Build Core 里的相关任务。命令执行时 TUI 仍然可以移动焦点、切换面板，命令结束后显示完整输出。
-- 非 Cargo 项目目录启动时会直接打印明确的 `FATAL: cargo metadata failed...` 错误并退出，不再打开空面板。
+- 非 Cargo 项目目录会进入 limited mode，不再退出，因此可以直接使用 `cargo new <name>` 创建项目。
 
 尚未完成：
 
@@ -69,6 +92,7 @@ cargo build --release
 - `PgUp/PgDn`: 滚动右侧瀑布屏。
 - `c`: 执行 `cargo check`。
 - `b`: 执行 `cargo build`。
+- 在 Build Core 选中 `new project` 后按 `Enter`：输入项目名，再按 `Enter` 执行 `cargo new <name>`。
 - `t`: 执行 `cargo tree`。
 - `i`: 执行 `cargo tree -i <selected dependency>`。
 - `s`: 打开 crates.io 搜索页。
@@ -142,7 +166,7 @@ cd /tmp
 /path/to/lazycargo
 ```
 
-预期结果：程序在打开 TUI 前退出，并打印 `FATAL: cargo metadata failed...`。
+预期结果：TUI 进入 limited mode。可以在 `Build Core -> new project` 创建 Cargo 项目。
 
 ## 产品方向
 

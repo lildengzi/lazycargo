@@ -120,6 +120,11 @@ pub(super) fn build_items() -> Vec<CommandItem> {
             detail: "cargo clean".to_owned(),
         },
         CommandItem {
+            key: "new",
+            label: "new project".to_owned(),
+            detail: "cargo new <name>".to_owned(),
+        },
+        CommandItem {
             key: "timings",
             label: "build --timings".to_owned(),
             detail: "cargo build --timings".to_owned(),

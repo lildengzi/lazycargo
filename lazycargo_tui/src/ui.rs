@@ -90,6 +90,7 @@ enum InputMode {
     Normal,
     Filter,
     CrateSearch,
+    ProjectNew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +148,26 @@ impl ContextTab {
     }
 }
 
+struct UiText {
+    donate_label: &'static str,
+    donate_url: &'static str,
+    keys_title: &'static str,
+    version_label: &'static str,
+    status_label: &'static str,
+    close_keys: &'static str,
+}
+
+fn ui_text() -> UiText {
+    UiText {
+        donate_label: "Donate",
+        donate_url: "https://github.com/sponsors/lildengzi",
+        keys_title: "Keys",
+        version_label: "Version",
+        status_label: "status",
+        close_keys: "Esc/x/Enter",
+    }
+}
+
 struct HistoryEntry {
     command: String,
     success: bool,
@@ -177,6 +198,7 @@ struct App {
     menu_open: bool,
     menu_selected: usize,
     filter: String,
+    new_project_name: String,
     search: SearchState,
     search_return_focus: Focus,
     command_preview: String,
@@ -227,6 +249,7 @@ impl App {
             menu_open: false,
             menu_selected: 0,
             filter: String::new(),
+            new_project_name: String::new(),
             search: SearchState::default(),
             search_return_focus: Focus::Workspace,
             command_preview,
@@ -270,6 +293,7 @@ impl App {
             InputMode::Normal => self.handle_normal_key(key),
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::CrateSearch => self.handle_crate_search_key(key),
+            InputMode::ProjectNew => self.handle_project_new_key(key),
         }
     }
 
@@ -636,6 +660,50 @@ impl App {
         true
     }
 
+    fn handle_project_new_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.new_project_name.clear();
+                self.message = "cargo new cancelled".to_owned();
+            }
+            KeyCode::Enter => {
+                let name = self.new_project_name.trim().to_owned();
+                self.input_mode = InputMode::Normal;
+                if name.is_empty() {
+                    self.message = "cargo new requires a project name".to_owned();
+                } else {
+                    self.new_project_name.clear();
+                    self.run_cargo(Focus::Build, &["new", &name]);
+                }
+            }
+            KeyCode::Backspace => {
+                self.new_project_name.pop();
+            }
+            KeyCode::Char(value) => self.new_project_name.push(value),
+            _ => {}
+        }
+
+        true
+    }
+
+    fn open_project_new_input(&mut self) {
+        self.input_mode = InputMode::ProjectNew;
+        self.new_project_name.clear();
+        self.set_focus(Focus::Build);
+        self.build_tab = BuildCoreTab::TaskConfig;
+        self.command_preview = "cargo new <name>".to_owned();
+        self.message = "new project name: ".to_owned();
+        self.build_detail = vec![
+            "Create new Cargo project".to_owned(),
+            String::new(),
+            "$ cargo new <name>".to_owned(),
+            String::new(),
+            "Type a project directory name in the status bar, then press Enter.".to_owned(),
+            "Esc cancels without creating anything.".to_owned(),
+        ];
+    }
+
     fn preview(&mut self, command: &str) {
         self.command_preview = command.to_owned();
         self.message = format!("preview: {command}");
@@ -753,6 +821,7 @@ impl App {
                 Some("doc") => self.run_cargo(Focus::Build, &["doc", "--no-deps"]),
                 Some("update") => self.run_cargo(Focus::Build, &["update"]),
                 Some("clean") => self.run_cargo(Focus::Build, &["clean"]),
+                Some("new") => self.open_project_new_input(),
                 Some("timings") => self.run_cargo(Focus::Build, &["build", "--timings"]),
                 Some("diagnostics") => self.build_tab = BuildCoreTab::LiveOutput,
                 _ => {}
@@ -941,6 +1010,10 @@ impl App {
         let Some(command) = result.first().map(String::as_str) else {
             return result;
         };
+
+        if command == "new" {
+            return result;
+        }
 
         if matches!(command, "run" | "update" | "clean") {
             if let Some(package) = self.selected_package() {
@@ -1269,18 +1342,49 @@ impl App {
 }
 
 pub fn run() -> io::Result<()> {
-    let project = match ProjectInfo::load() {
-        Ok(project) => project,
-        Err(error) => {
-            eprintln!("FATAL: {error}");
-            std::process::exit(1);
-        }
+    let (project, startup_message) = match ProjectInfo::load() {
+        Ok(project) => (project, None),
+        Err(error) => (
+            fallback_project_info(),
+            Some(format!("No Cargo.toml found; limited mode: {error}")),
+        ),
     };
     let mut terminal = setup_terminal()?;
     let mut app = App::new(project);
+    if let Some(message) = startup_message {
+        app.last_status = "limited mode".to_owned();
+        app.message = "limited mode: cargo new is available".to_owned();
+        app.output = vec![
+            "Limited mode".to_owned(),
+            String::new(),
+            message,
+            String::new(),
+            "This directory is not a Cargo project yet.".to_owned(),
+            "Use [2]-Build Core -> new project to run cargo new <name>.".to_owned(),
+            "Search is also available with s.".to_owned(),
+        ];
+    }
     let result = run_app(&mut terminal, &mut app);
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn fallback_project_info() -> ProjectInfo {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let name = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace")
+        .to_owned();
+    ProjectInfo {
+        name,
+        version: "<no Cargo.toml>".to_owned(),
+        workspace_root: cwd.to_string_lossy().into_owned(),
+        manifest_path: cwd.join("Cargo.toml").to_string_lossy().into_owned(),
+        rustc_version: "<unknown>".to_owned(),
+        ..ProjectInfo::default()
+    }
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -1565,11 +1669,7 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .iter()
         .skip(offset)
         .take(visible_rows)
-        .flat_map(|line| {
-            line.into_text()
-                .map(|text| text.lines)
-                .unwrap_or_else(|_| vec![Line::from(line.clone())])
-        })
+        .flat_map(output_line_to_lines)
         .collect();
 
     let block = output_block(app, area);
@@ -1633,10 +1733,10 @@ fn embedded_tab_title(app: &App) -> Line<'static> {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
+            Style::default().fg(Color::Gray)
         };
         if index > 0 {
-            spans.push(Span::styled(" - ", Style::default()));
+            spans.push(Span::styled(" - ", Style::default().fg(Color::Gray)));
         }
         spans.push(Span::styled(tab.label(), style));
     }
@@ -1676,24 +1776,28 @@ fn update_embedded_tab_areas(app: &mut App, area: Rect) {
 }
 
 fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
+    let text = ui_text();
     let area = centered_rect(70, 64, frame.area());
     let version = env!("CARGO_PKG_VERSION");
     let lines = key_dialog_lines(app);
-    let donate_prefix = format!("Version  {version}    Donate  ");
+    let donate_prefix = format!(
+        "{}  {version}    {}  ",
+        text.version_label, text.donate_label
+    );
     let donate_line = lines.len().saturating_sub(2) as u16;
     app.link_areas.push((
         Rect {
             x: area.x.saturating_add(1 + donate_prefix.len() as u16),
             y: area.y.saturating_add(1 + donate_line),
-            width: "Bilibili".len() as u16,
+            width: text.donate_label.len() as u16,
             height: 1,
         },
-        "https://www.bilibili.com".to_owned(),
+        text.donate_url.to_owned(),
     ));
     let widget = Paragraph::new(lines).block(
         Block::default()
             .title(Span::styled(
-                "Keys",
+                text.keys_title,
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -1707,6 +1811,7 @@ fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn key_dialog_lines(app: &App) -> Vec<Line<'static>> {
+    let text = ui_text();
     let version = env!("CARGO_PKG_VERSION");
     vec![
         Line::from(vec![Span::styled(
@@ -1752,22 +1857,31 @@ fn key_dialog_lines(app: &App) -> Vec<Line<'static>> {
         key_line("o/d/g", "open crates/docs/repo"),
         key_line("y", "copy selected detail"),
         Line::from(vec![
-            Span::styled("Version  ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}  ", text.version_label),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(version.to_owned()),
             Span::raw("    "),
-            Span::styled("Donate  ", Style::default().fg(Color::Yellow)),
             Span::styled(
-                "Bilibili",
+                format!("{}  ", text.donate_label),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                text.donate_label,
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::UNDERLINED),
             ),
             Span::raw("    "),
-            Span::styled("Esc/x/Enter", Style::default().fg(Color::Green)),
+            Span::styled(text.close_keys, Style::default().fg(Color::Green)),
             Span::raw(" close"),
         ]),
         Line::from(vec![
-            Span::styled("status  ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}  ", text.status_label),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(app.last_status.clone()),
         ]),
     ]
@@ -1781,9 +1895,8 @@ fn key_line(key: &'static str, label: &'static str) -> Line<'static> {
 }
 
 fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    const DONATE_URL: &str = "https://github.com/sponsors/lildengzi";
-    let donate_text = "Donate";
-    let donate_width = donate_text.len() as u16;
+    let text = ui_text();
+    let donate_width = text.donate_label.len() as u16;
     let version_text = format!(" v{}", env!("CARGO_PKG_VERSION"));
     let version_width = version_text.len() as u16;
     let donate_x = area
@@ -1796,7 +1909,7 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             width: donate_width,
             height: 1,
         },
-        DONATE_URL.to_owned(),
+        text.donate_url.to_owned(),
     ));
 
     let line = match app.input_mode {
@@ -1805,11 +1918,6 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Span::raw("Enter search, Esc results, q back, x keys"),
             Span::styled(
                 format!("  {}", app.last_status),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Color::Green),
             ),
         ]),
@@ -1821,16 +1929,19 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Style::default().fg(Color::Green),
             ),
         ]),
+        InputMode::ProjectNew => Line::from(vec![
+            Span::styled("new: ", Style::default().fg(Color::Yellow)),
+            Span::raw(&app.new_project_name),
+            Span::styled(
+                "  Enter create, Esc cancel",
+                Style::default().fg(Color::Green),
+            ),
+        ]),
         InputMode::Normal if app.copy_mode => Line::from(vec![
             Span::styled("copy: ", Style::default().fg(Color::Yellow)),
             Span::raw("drag select, m mouse, x keys"),
             Span::styled(
                 format!("  {}", app.last_status),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Color::Green),
             ),
         ]),
@@ -1845,11 +1956,6 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Span::raw(": keys"),
             Span::styled(
                 format!("  {}", app.last_status),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Color::Green),
             ),
         ]),
@@ -1868,18 +1974,13 @@ fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 format!("  {}", app.last_status),
                 Style::default().fg(Color::Green),
             ),
-            Span::raw("  "),
-            Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(Color::Green),
-            ),
         ]),
     };
 
     frame.render_widget(Paragraph::new(line), area);
     let donate_line = Line::from(vec![
         Span::styled(
-            donate_text,
+            text.donate_label,
             Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::UNDERLINED),
@@ -2094,6 +2195,202 @@ fn format_bytes(bytes: u64) -> String {
         unit += 1;
     }
     format!("{value:.1} {}", UNITS[unit])
+}
+
+fn output_line_to_lines(line: &String) -> Vec<Line<'static>> {
+    if line.contains('\u{1b}') {
+        return line
+            .into_text()
+            .map(|text| text.lines)
+            .unwrap_or_else(|_| vec![semantic_output_line(line)]);
+    }
+    vec![semantic_output_line(line)]
+}
+
+fn semantic_output_line(raw: &str) -> Line<'static> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_lowercase();
+
+    if trimmed.is_empty() {
+        return Line::from(String::new());
+    }
+
+    if let Some(line) = feature_marker_line(raw) {
+        return line;
+    }
+    if lower.starts_with('$') {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    if lower.starts_with("exit:") || lower.starts_with("duration:") {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("exit status: 1")
+    {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if lower.contains("warning") || lower.contains("unused") {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if looks_like_tree_line(raw) {
+        return tree_output_line(raw);
+    }
+    if first_url(raw).is_some() {
+        return url_output_line(raw);
+    }
+    if is_section_heading(trimmed) {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some((key, value)) = raw.split_once(':') {
+        return key_value_line(key, value);
+    }
+    if lower.contains(" v") || lower.starts_with("version ") || lower.starts_with("version:") {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if lower.contains('/') && (lower.starts_with("  ") || lower.starts_with('(')) {
+        return Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    Line::from(raw.to_owned())
+}
+
+fn feature_marker_line(raw: &str) -> Option<Line<'static>> {
+    let marker_index = raw.find('[')?;
+    let marker = raw.get(marker_index..marker_index.saturating_add(3))?;
+    let style = match marker {
+        "[x]" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "[-]" => Style::default().fg(Color::Yellow),
+        "[ ]" => Style::default().fg(Color::DarkGray),
+        _ => return None,
+    };
+    Some(Line::from(vec![
+        Span::raw(raw[..marker_index].to_owned()),
+        Span::styled(marker.to_owned(), style),
+        Span::styled(raw[marker_index + 3..].to_owned(), style),
+    ]))
+}
+
+fn is_section_heading(trimmed: &str) -> bool {
+    matches!(
+        trimmed,
+        "Actions"
+            | "Build"
+            | "Cargo metrics"
+            | "Dependencies"
+            | "Disk"
+            | "Disk tracking"
+            | "Effect"
+            | "Feature state"
+            | "Health snapshot"
+            | "Hot paths"
+            | "Links"
+            | "Local path"
+            | "Members"
+            | "Package disk snapshot"
+            | "Package identity"
+            | "Project health snapshot"
+            | "Targets"
+            | "Workspace metrics"
+            | "Workspace scope"
+    )
+}
+
+fn key_value_line(key: &str, value: &str) -> Line<'static> {
+    let value_style = if value.contains("http://") || value.contains("https://") {
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::UNDERLINED)
+    } else if value.contains('/') {
+        Style::default().fg(Color::Cyan)
+    } else if value.contains("unknown") || value.contains("<") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(
+            key.to_owned(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":"),
+        Span::styled(value.to_owned(), value_style),
+    ])
+}
+
+fn url_output_line(raw: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    for part in raw.split_inclusive(' ') {
+        let style = if part.starts_with("http://") || part.starts_with("https://") {
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(part.to_owned(), style));
+    }
+    Line::from(spans)
+}
+
+fn looks_like_tree_line(raw: &str) -> bool {
+    raw.contains("├")
+        || raw.contains("└")
+        || raw.contains("│")
+        || raw.contains("──")
+        || raw.contains(" (*)")
+}
+
+fn tree_output_line(raw: &str) -> Line<'static> {
+    let split_at = raw
+        .char_indices()
+        .find(|(_, ch)| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let (tree_prefix, rest) = raw.split_at(split_at);
+    let mut spans = vec![Span::styled(
+        tree_prefix.to_owned(),
+        Style::default().fg(Color::DarkGray),
+    )];
+    for part in rest.split_inclusive(' ') {
+        let style =
+            if part.starts_with('v') || part.contains("(*)") || part.contains("(proc-macro)") {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+        spans.push(Span::styled(part.to_owned(), style));
+    }
+    Line::from(spans)
 }
 
 fn cargo_output_paths() -> (PathBuf, PathBuf) {
