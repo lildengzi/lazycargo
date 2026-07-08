@@ -50,7 +50,7 @@ jobs:
         if: ${{ github.event.inputs.dry_run == 'true' }}
         run: |
           cargo publish -p lazycargo_search --dry-run
-          if cargo info lazycargo_search >/dev/null 2>&1; then
+          if cargo search lazycargo_search --limit 5 | grep -q '^lazycargo_search ='; then
             cargo publish -p lazycargo-tui --dry-run
           else
             echo "Skipping lazycargo-tui dry-run until lazycargo_search exists on crates.io."
@@ -67,7 +67,7 @@ jobs:
         if: ${{ github.event.inputs.dry_run == 'false' }}
         run: |
           for attempt in $(seq 1 30); do
-            if cargo info lazycargo_search >/dev/null 2>&1; then
+            if cargo search lazycargo_search --limit 5 | grep -q '^lazycargo_search ='; then
               echo "lazycargo_search is visible in crates.io index."
               exit 0
             fi
