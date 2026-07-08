@@ -3,7 +3,7 @@
 [中文说明](README.zh-CN.md)
 
 <p align="center">
-  <a href="https://crates.io/crates/lazycargo"><img src="https://img.shields.io/crates/v/lazycargo.svg" alt="Crates.io"></a>
+  <a href="https://crates.io/crates/lazycargo-tui"><img src="https://img.shields.io/crates/v/lazycargo-tui.svg" alt="Crates.io"></a>
   <a href="https://github.com/lildengzi/lazycargo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lildengzi/lazycargo" alt="MIT"></a>
   <img src="https://img.shields.io/badge/rust-1.81+-blue" alt="Rust">
 </p>
@@ -46,11 +46,11 @@ Early development, but the main TUI flow is already usable day-to-day.
   - Dependencies: `Features`, `Dependency Tree`
 - Persistent right-side waterfall output with ANSI color parsing, semantic coloring, scrollbar, keyboard scroll, mouse wheel, and draggable scrollbar.
 - `cargo tree` and `cargo tree -i <crate>` output in the Dependency Tree view.
-- Pacseek-style crates.io search page using `cargo search` and `cargo info`.
+- Pacseek-style crates.io search page using the crates.io API with `cargo search` fallback and `cargo info` inspection.
 - Clickable crates.io/docs/repository links.
 - Terminal copy mode with `m` (releases mouse capture for text selection).
 - Clipboard copy for search detail with `y`.
-- Non-blocking Cargo actions for `check`, `build`, `test`, `run`, `tree`, and related tasks. TUI stays responsive while commands run.
+- Streaming, non-blocking Cargo actions for `check`, `build`, `test`, `run`, `tree`, and related tasks. TUI stays responsive while commands run.
 - Limited mode outside Cargo projects — opens the TUI anyway so `cargo new` works.
 
 **Not implemented yet:**
@@ -58,14 +58,15 @@ Early development, but the main TUI flow is already usable day-to-day.
 - Structured interactive dependency graph nodes.
 - Click-to-expand dependency tree.
 - Conflict path highlighting.
-- True streaming subprocess output while Cargo is still running (commands are non-blocking, full log renders after completion).
 
 ## Install / Run
 
 ```bash
-cargo install lazycargo
+cargo install lazycargo-tui
 lazycargo
 ```
+
+The crates.io package is published as `lazycargo-tui`; the installed command is `lazycargo`.
 
 Or build from source:
 
@@ -82,7 +83,7 @@ Running without arguments opens the TUI. There's also a command-preview CLI mode
 
 ```bash
 lazycargo check --workspace
-lazycargo build -p lazycargo --release
+lazycargo build -p lazycargo-tui --release
 lazycargo add serde_json --features preserve_order
 ```
 

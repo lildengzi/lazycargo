@@ -1,7 +1,7 @@
 # lazycargo
 
 <p align="center">
-  <a href="https://crates.io/crates/lazycargo"><img src="https://img.shields.io/crates/v/lazycargo.svg" alt="Crates.io"></a>
+  <a href="https://crates.io/crates/lazycargo-tui"><img src="https://img.shields.io/crates/v/lazycargo-tui.svg" alt="Crates.io"></a>
   <a href="https://github.com/lildengzi/lazycargo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lildengzi/lazycargo" alt="MIT"></a>
   <img src="https://img.shields.io/badge/rust-1.81+-blue" alt="Rust">
 </p>
@@ -44,11 +44,11 @@
   - Dependencies: `Features`, `Dependency Tree`
 - 右侧瀑布屏支持持久输出、ANSI 颜色解析、语义着色、滚动条、键盘/鼠标滚动。
 - `cargo tree` 和 `cargo tree -i <crate>` 输出到 Dependency Tree 视图。
-- 类 pacseek 的 crates.io 搜索页，基于 `cargo search` 和 `cargo info`。
+- 类 pacseek 的 crates.io 搜索页，优先使用 crates.io API，失败时回退到 `cargo search`，并支持 `cargo info` 检查。
 - 支持打开 crates.io / docs / repository 链接。
 - `m` 切换终端复制模式，释放鼠标捕获以便拖选文字。
 - `y` 复制搜索详情。
-- 核心 Cargo 动作已非阻塞（`check`、`build`、`test`、`run`、`tree` 等）。命令执行时 TUI 仍然可以操作。
+- 核心 Cargo 动作已流式、非阻塞（`check`、`build`、`test`、`run`、`tree` 等）。命令执行时 TUI 仍然可以操作。
 - 非 Cargo 项目目录进入 limited mode，可直接用 `cargo new <name>` 创建项目。
 
 **尚未完成：**
@@ -56,14 +56,15 @@
 - 结构化的交互式依赖图节点。
 - 点击展开/折叠依赖树。
 - 依赖冲突路径高亮。
-- Cargo 子进程运行中的真正实时流式输出（当前非阻塞，完整日志在进程结束后渲染）。
 
 ## 安装与运行
 
 ```bash
-cargo install lazycargo
+cargo install lazycargo-tui
 lazycargo
 ```
+
+crates.io 上的发布包名是 `lazycargo-tui`，安装后的命令仍然是 `lazycargo`。
 
 或从源码构建：
 
@@ -80,7 +81,7 @@ cargo build --release
 
 ```bash
 lazycargo check --workspace
-lazycargo build -p lazycargo --release
+lazycargo build -p lazycargo-tui --release
 lazycargo add serde_json --features preserve_order
 ```
 

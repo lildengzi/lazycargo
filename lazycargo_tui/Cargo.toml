@@ -1,5 +1,5 @@
 [package]
-name = "lazycargo"
+name = "lazycargo-tui"
 version.workspace = true
 edition.workspace = true
 description = "A project-focused Cargo management TUI."
@@ -10,17 +10,24 @@ homepage = "https://github.com/lildengzi/lazycargo"
 keywords = ["cargo", "tui", "rust", "workspace"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "lazycargo"
+path = "src/lib.rs"
+
 [dependencies]
 ansi-to-tui = "8.0"
 arboard = "3.4"
 base64.workspace = true
 cargo_metadata = "0.19"
+chrono.workspace = true
 crossterm.workspace = true
+dirs.workspace = true
 lazycargo_search = { path = "../lazycargo_search", version = "0.1.1" }
 open = "5.3"
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+walkdir.workspace = true
 
 [[bin]]
 name = "lazycargo"
