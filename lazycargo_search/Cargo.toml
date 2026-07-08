@@ -11,3 +11,5 @@ keywords = ["cargo", "crates", "search"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde.workspace = true

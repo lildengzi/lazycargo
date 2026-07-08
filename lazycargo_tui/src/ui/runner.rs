@@ -1,7 +1,62 @@
-use std::io;
+use std::ffi::OsStr;
+use std::fmt::Debug;
+use std::io::{self, BufRead};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub(crate) enum OutputLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+pub(super) fn spawn_streaming<A>(
+    program: &OsStr,
+    args: &[A],
+    envs: &[(&str, &str)],
+) -> io::Result<(std::process::Child, mpsc::Receiver<OutputLine>)>
+where
+    A: AsRef<OsStr> + Debug,
+{
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("stdout captured");
+    let stderr = child.stderr.take().expect("stderr captured");
+    let (tx, rx) = mpsc::channel();
+    let stderr_tx = tx.clone();
+
+    thread::spawn(move || {
+        let reader = io::BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(text) = line else {
+                break;
+            };
+            if tx.send(OutputLine::Stdout(text)).is_err() {
+                break;
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let reader = io::BufReader::new(stderr);
+        for line in reader.lines() {
+            let Ok(text) = line else {
+                break;
+            };
+            if stderr_tx.send(OutputLine::Stderr(text)).is_err() {
+                break;
+            }
+        }
+    });
+
+    Ok((child, rx))
+}
 
 pub(super) fn command_output_with_timeout(
     program: &str,

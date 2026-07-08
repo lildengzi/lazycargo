@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+use serde::Deserialize;
+
 /// A single row returned by `cargo search`.
 #[derive(Debug, Clone)]
 pub struct CrateSearchResult {
@@ -5,7 +9,24 @@ pub struct CrateSearchResult {
     pub author: Option<String>,
     pub version: String,
     pub description: String,
+    pub homepage: Option<String>,
+    pub documentation: Option<String>,
+    pub repository: Option<String>,
+    pub downloads: Option<u64>,
+    pub recent_downloads: Option<u64>,
+    pub updated_at: Option<String>,
 }
+
+#[derive(Debug)]
+pub struct CrateSearchError(String);
+
+impl std::fmt::Display for CrateSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CrateSearchError {}
 
 /// Link slots exposed by the search detail page.
 #[derive(Debug, Clone, Copy)]
@@ -80,7 +101,18 @@ impl SearchState {
 
         self.results
             .iter()
-            .map(|result| format!("{:<36} {}", result.name, result.version))
+            .map(|result| {
+                format!(
+                    "{:<24} {:<10} {:>8} {}",
+                    result.name,
+                    result.version,
+                    result
+                        .downloads
+                        .map(format_count)
+                        .unwrap_or_else(|| "-".to_owned()),
+                    result.source_label()
+                )
+            })
             .collect()
     }
 
@@ -139,6 +171,7 @@ impl SearchState {
     pub fn docs_url(&self) -> Option<String> {
         let result = self.selected_result()?;
         self.info_url_for(result, "documentation:")
+            .or_else(|| result.documentation.clone())
             .or_else(|| Some(format!("https://docs.rs/{}", result.name)))
     }
 
@@ -146,6 +179,7 @@ impl SearchState {
     pub fn repository_url(&self) -> Option<String> {
         let result = self.selected_result()?;
         self.info_url_for(result, "repository:")
+            .or_else(|| result.repository.clone())
     }
 
     /// Return the URL for a requested search detail link target.
@@ -161,7 +195,7 @@ impl SearchState {
     pub fn unavailable_message(target: SearchLinkTarget) -> &'static str {
         match target {
             SearchLinkTarget::Repository => {
-                "repository link unavailable; press enter to run cargo info first"
+                "repository link unavailable; press enter to run cargo info"
             }
             SearchLinkTarget::Crates | SearchLinkTarget::Docs => "no selected crate link",
         }
@@ -188,21 +222,51 @@ pub fn base_search_detail(result: &CrateSearchResult) -> Vec<String> {
         format!("description: {}", result.description),
         String::new(),
     ];
+    if let Some(downloads) = result.downloads {
+        lines.push(format!("downloads: {}", format_count(downloads)));
+    }
+    if let Some(downloads) = result.recent_downloads {
+        lines.push(format!("recent downloads: {}", format_count(downloads)));
+    }
+    if let Some(updated_at) = &result.updated_at {
+        lines.push(format!("updated: {updated_at}"));
+    }
+    if result.downloads.is_some()
+        || result.recent_downloads.is_some()
+        || result.updated_at.is_some()
+    {
+        lines.push(String::new());
+    }
     if let Some(author) = &result.author {
         lines.push(format!("author: {author}"));
         lines.push(String::new());
     }
+    lines.push("Links".to_owned());
+    lines.push(format!(
+        "  crates.io: https://crates.io/crates/{}",
+        result.name
+    ));
+    let docs_url = result
+        .documentation
+        .clone()
+        .unwrap_or_else(|| default_docs_url(&result.name));
+    lines.push(format!("  docs.rs: {docs_url}"));
+    if let Some(homepage) = &result.homepage {
+        lines.push(format!("  homepage: {homepage}"));
+    }
+    if let Some(repository) = &result.repository {
+        lines.push(format!("  repository: {repository}"));
+    } else {
+        lines.push("  repository: <not declared by crates.io>".to_owned());
+    }
     lines.extend([
-        "Links".to_owned(),
-        format!("  crates.io: https://crates.io/crates/{}", result.name),
-        format!("  docs.rs: https://docs.rs/{}", result.name),
         String::new(),
         "Actions".to_owned(),
         "  enter: inspect with cargo info".to_owned(),
         "  a: preview cargo add for selected crate".to_owned(),
         "  o: open crates.io".to_owned(),
         "  d: open docs".to_owned(),
-        "  g: open repository after cargo info".to_owned(),
+        "  g: open repository".to_owned(),
         "  y: copy this detail".to_owned(),
         "  s: search again".to_owned(),
     ]);
@@ -215,6 +279,15 @@ pub fn crate_info_detail(result: &CrateSearchResult, report: &CrateInfoReport<'_
     if result.author.is_none() {
         result.author = extract_crate_author(report.lines);
     }
+    if let Some(homepage) = extract_prefixed_value(report.lines, "homepage:") {
+        result.homepage = Some(homepage);
+    }
+    if let Some(documentation) = extract_prefixed_value(report.lines, "documentation:") {
+        result.documentation = Some(documentation);
+    }
+    if let Some(repository) = extract_prefixed_value(report.lines, "repository:") {
+        result.repository = Some(repository);
+    }
 
     let mut detail = base_search_detail(&result);
     detail.push(String::new());
@@ -224,7 +297,11 @@ pub fn crate_info_detail(result: &CrateSearchResult, report: &CrateInfoReport<'_
     if let Some(status) = &report.status {
         detail.push(format!("exit: {status}"));
         detail.push(String::new());
-        detail.extend(extract_crate_info_lines(report.lines));
+        detail.extend(
+            extract_crate_info_lines(report.lines)
+                .into_iter()
+                .filter(|line| !is_link_or_author_line(line)),
+        );
     } else if report.timeout {
         detail.push("cargo info timed out after 8s".to_owned());
         detail.push(
@@ -252,6 +329,45 @@ pub fn search_timeout_detail(command: &str, duration_secs: f32) -> Vec<String> {
 /// Build a detail message for a failed crate search process.
 pub fn search_error_detail(command: &str, error: &str) -> Vec<String> {
     vec![format!("failed to run {command}: {error}")]
+}
+
+/// Search crates.io through the first-party HTTP API.
+pub fn search_crates_registry(query: &str) -> Result<Vec<CrateSearchResult>, CrateSearchError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("lazycargo (https://github.com/lildengzi/lazycargo)")
+        .build()
+        .map_err(|error| CrateSearchError(format!("failed to build HTTP client: {error}")))?;
+
+    let response = client
+        .get("https://crates.io/api/v1/crates")
+        .query(&[("q", query), ("per_page", "100")])
+        .send()
+        .map_err(|error| CrateSearchError(format!("crates.io request failed: {error}")))?;
+
+    if !response.status().is_success() {
+        return Err(CrateSearchError(format!(
+            "crates.io returned HTTP {}",
+            response.status()
+        )));
+    }
+
+    let payload = response
+        .json::<CratesApiResponse>()
+        .map_err(|error| CrateSearchError(format!("invalid crates.io response: {error}")))?;
+
+    let mut results = payload
+        .crates
+        .into_iter()
+        .map(CrateSearchResult::from)
+        .collect::<Vec<_>>();
+    results.sort_by_key(|result| search_rank(result, &query.to_lowercase()));
+    Ok(results)
 }
 
 /// Parse `cargo search` output, filter by package name or description, and rank matches.
@@ -290,6 +406,12 @@ pub fn parse_crate_search_results(lines: &[String], query: &str) -> Vec<CrateSea
                 author: None,
                 version: version.to_owned(),
                 description: description.to_owned(),
+                homepage: None,
+                documentation: None,
+                repository: None,
+                downloads: None,
+                recent_downloads: None,
+                updated_at: None,
             })
         })
         .collect::<Vec<_>>();
@@ -314,6 +436,105 @@ fn search_rank(result: &CrateSearchResult, query: &str) -> (u8, String) {
     };
 
     (rank, name)
+}
+
+#[derive(Debug, Deserialize)]
+struct CratesApiResponse {
+    crates: Vec<CratesApiCrate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CratesApiCrate {
+    name: String,
+    description: Option<String>,
+    max_version: String,
+    max_stable_version: Option<String>,
+    homepage: Option<String>,
+    documentation: Option<String>,
+    repository: Option<String>,
+    downloads: u64,
+    recent_downloads: Option<u64>,
+    updated_at: Option<String>,
+}
+
+impl From<CratesApiCrate> for CrateSearchResult {
+    fn from(value: CratesApiCrate) -> Self {
+        Self {
+            name: value.name,
+            author: None,
+            version: value.max_stable_version.unwrap_or(value.max_version),
+            description: value.description.unwrap_or_default(),
+            homepage: non_empty(value.homepage),
+            documentation: non_empty(value.documentation),
+            repository: non_empty(value.repository),
+            downloads: Some(value.downloads),
+            recent_downloads: value.recent_downloads,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl CrateSearchResult {
+    fn source_label(&self) -> String {
+        if let Some(author) = &self.author {
+            return format!("author:{author}");
+        }
+        self.repository
+            .as_deref()
+            .or(self.homepage.as_deref())
+            .and_then(repository_owner)
+            .map(|owner| format!("repo:{owner}"))
+            .unwrap_or_else(|| "repo:-".to_owned())
+    }
+}
+
+fn repository_owner(url: &str) -> Option<String> {
+    let cleaned = url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("git@");
+    let cleaned = cleaned.strip_prefix("github.com:").unwrap_or(cleaned);
+    let mut parts = cleaned.split('/');
+    let host = parts.next()?;
+    if !host.eq_ignore_ascii_case("github.com")
+        && !host.eq_ignore_ascii_case("gitlab.com")
+        && !host.eq_ignore_ascii_case("codeberg.org")
+    {
+        return None;
+    }
+    parts
+        .next()
+        .filter(|owner| !owner.is_empty())
+        .map(str::to_owned)
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_owned();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn default_docs_url(name: &str) -> String {
+    format!("https://docs.rs/{name}")
+}
+
+fn format_count(value: u64) -> String {
+    const UNITS: &[&str] = &["", "K", "M", "B"];
+    let mut value = value as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{}", value as u64)
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
 }
 
 /// Keep the high-signal metadata lines from `cargo info` output.
@@ -350,13 +571,26 @@ pub fn extract_crate_info_lines(lines: &[String]) -> Vec<String> {
 
 /// Extract the authors field from `cargo info` output.
 pub fn extract_crate_author(lines: &[String]) -> Option<String> {
+    extract_prefixed_value(lines, "authors:")
+}
+
+fn extract_prefixed_value(lines: &[String], prefix: &str) -> Option<String> {
     lines.iter().find_map(|line| {
         line.trim()
-            .strip_prefix("authors:")
+            .strip_prefix(prefix)
             .map(str::trim)
-            .filter(|author| !author.is_empty())
+            .filter(|value| !value.is_empty())
             .map(str::to_owned)
     })
+}
+
+fn is_link_or_author_line(line: &str) -> bool {
+    let lower = line.trim().to_lowercase();
+    lower.starts_with("repository:")
+        || lower.starts_with("homepage:")
+        || lower.starts_with("documentation:")
+        || lower.starts_with("crates.io:")
+        || lower.starts_with("authors:")
 }
 
 #[cfg(test)]
@@ -365,6 +599,21 @@ mod tests {
 
     fn lines(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn result(name: &str) -> CrateSearchResult {
+        CrateSearchResult {
+            name: name.to_owned(),
+            author: None,
+            version: "1.2.3".to_owned(),
+            description: format!("{name} crate"),
+            homepage: None,
+            documentation: None,
+            repository: None,
+            downloads: None,
+            recent_downloads: None,
+            updated_at: None,
+        }
     }
 
     #[test]
@@ -442,12 +691,7 @@ mod tests {
     #[test]
     fn search_state_uses_cached_info_links_when_available() {
         let mut state = SearchState::default();
-        state.set_results(vec![CrateSearchResult {
-            name: "demo".to_owned(),
-            author: None,
-            version: "1.2.3".to_owned(),
-            description: "demo crate".to_owned(),
-        }]);
+        state.set_results(vec![result("demo")]);
         state.set_info_detail(
             "demo".to_owned(),
             lines(&[
@@ -470,5 +714,70 @@ mod tests {
             state.url_for(SearchLinkTarget::Crates).as_deref(),
             Some("https://example.invalid/crate")
         );
+    }
+
+    #[test]
+    fn search_state_uses_api_links_before_cargo_info() {
+        let mut item = result("demo");
+        item.documentation = Some("https://docs.rs/demo/latest/demo".to_owned());
+        item.repository = Some("https://github.com/example/demo".to_owned());
+
+        let mut state = SearchState::default();
+        state.set_results(vec![item]);
+
+        assert_eq!(
+            state.url_for(SearchLinkTarget::Docs).as_deref(),
+            Some("https://docs.rs/demo/latest/demo")
+        );
+        assert_eq!(
+            state.url_for(SearchLinkTarget::Repository).as_deref(),
+            Some("https://github.com/example/demo")
+        );
+    }
+
+    #[test]
+    fn result_items_include_version_downloads_and_repo_owner() {
+        let mut item = result("demo");
+        item.downloads = Some(24_000);
+        item.repository = Some("https://github.com/example/demo".to_owned());
+
+        let mut state = SearchState::default();
+        state.set_results(vec![item]);
+
+        let row = state.result_items().remove(0);
+        assert!(row.contains("demo"));
+        assert!(row.contains("1.2.3"));
+        assert!(row.contains("24.0K"));
+        assert!(row.contains("repo:example"));
+    }
+
+    #[test]
+    fn cargo_info_detail_overrides_stale_api_links() {
+        let mut item = result("demo");
+        item.homepage = Some("https://github.com/old/demo".to_owned());
+        item.repository = Some("https://github.com/old/demo".to_owned());
+
+        let detail = crate_info_detail(
+            &item,
+            &CrateInfoReport {
+                command: "cargo info demo",
+                duration_secs: 0.2,
+                status: Some("exit status: 0".to_owned()),
+                lines: &lines(&[
+                    "homepage: https://github.com/new/demo",
+                    "repository: https://github.com/new/demo",
+                    "documentation: https://docs.rs/demo",
+                    "license: MIT",
+                ]),
+                timeout: false,
+                error: None,
+            },
+        );
+
+        assert!(detail
+            .iter()
+            .any(|line| line == "  repository: https://github.com/new/demo"));
+        assert!(!detail.iter().any(|line| line.contains("github.com/old")));
+        assert!(detail.iter().any(|line| line == "license: MIT"));
     }
 }
