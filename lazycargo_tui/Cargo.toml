@@ -32,3 +32,26 @@ walkdir.workspace = true
 [[bin]]
 name = "lazycargo"
 path = "src/main.rs"
+
+[package.metadata.deb]
+name = "lazycargo"
+maintainer = "lildengzi"
+copyright = "2026, lildengzi"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/lazycargo", "usr/bin/lazycargo", "755"],
+    ["../README.md", "usr/share/doc/lazycargo/README.md", "644"],
+    ["../LICENSE", "usr/share/doc/lazycargo/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "lazycargo"
+license = "MIT"
+summary = "A lazygit-style Cargo workspace TUI for Rust projects."
+assets = [
+    { source = "../target/release/lazycargo", dest = "/usr/bin/lazycargo", mode = "755" },
+    { source = "../README.md", dest = "/usr/share/doc/lazycargo/README.md", mode = "644" },
+    { source = "../LICENSE", dest = "/usr/share/doc/lazycargo/LICENSE", mode = "644" },
+]

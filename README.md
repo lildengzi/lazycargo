@@ -12,9 +12,15 @@
   <img src="docs/pics/ProjectsIcon.png" alt="lazycargo project icon" width="256">
 </p>
 
-A Rust project TUI for poking around your Cargo workspace without leaving the terminal.
+`lazycargo` is a lazygit-style Cargo workspace TUI for Rust projects.
 
-Not a thin wrapper around `cargo build` or `cargo test`. The goal is to surface the stuff that's annoying to dig up with raw CLI commands: package scope, dependency features, dependency trees, command output, build history, disk usage, and crates.io search.
+It is not a thin wrapper around `cargo build` or `cargo test`. It keeps the project, build actions, dependency state, command output, target disk usage, build history, and crates.io metadata in one terminal workspace.
+
+The main things it is built to make easier:
+
+- See which package scope you are operating on before running Cargo commands.
+- Inspect dependency features and reverse dependency paths without digging through raw `cargo tree` output.
+- Track target/ disk usage and build output in a persistent, scrollable right pane.
 
 ## Screenshots
 
@@ -60,6 +66,41 @@ Early development, but the main TUI flow is already usable day-to-day.
 - Conflict path highlighting.
 
 ## Install / Run
+
+Download a binary or Linux package from the latest GitHub Release:
+
+- `lazycargo-linux-x86_64`
+- `lazycargo-linux-x86_64.tar.gz`
+- `lazycargo-macos-aarch64`
+- `lazycargo-macos-aarch64.tar.gz`
+- `lazycargo-windows-msvc-x86_64.exe`
+- `lazycargo-windows-msvc-x86_64.zip`
+- `.deb` and `.rpm` packages for Linux
+
+On Debian/Ubuntu:
+
+```bash
+sudo dpkg -i lazycargo_*.deb
+lazycargo
+```
+
+On Fedora/RHEL/openSUSE:
+
+```bash
+sudo rpm -i lazycargo-*.rpm
+lazycargo
+```
+
+On Windows, download the `.zip`, extract it, and put `lazycargo.exe` somewhere in `PATH`.
+
+With Homebrew, after the tap is published:
+
+```bash
+brew tap lildengzi/tap
+brew install lazycargo
+```
+
+Or install with Cargo:
 
 ```bash
 cargo install lazycargo-tui

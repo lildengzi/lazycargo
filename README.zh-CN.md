@@ -10,9 +10,15 @@
   <img src="docs/pics/ProjectsIcon.png" alt="lazycargo 项目图标" width="256">
 </p>
 
-一个面向 Rust 项目的终端 TUI 工具。
+`lazycargo` 是一个 lazygit 风格的 Cargo workspace TUI，面向 Rust 项目日常开发。
 
-用处：查看当前 package 作用域、依赖 features、依赖树、命令输出、构建历史、磁盘占用和 crates.io 搜索。
+它不是 `cargo build` 或 `cargo test` 的薄封装，而是把项目作用域、构建动作、依赖状态、命令输出、target 磁盘占用、构建历史和 crates.io 元数据放进同一个终端工作台。
+
+它重点解决三件事：
+
+- 运行 Cargo 命令前，明确当前操作的是 workspace 还是某个 package。
+- 不用在原始 `cargo tree` 输出里硬找，也能查看依赖 features 和反向依赖路径。
+- 在持久、可滚动的右侧瀑布屏里查看 target/ 磁盘占用和构建输出。
 
 ## 界面预览
 
@@ -58,6 +64,41 @@
 - 依赖冲突路径高亮。
 
 ## 安装与运行
+
+从最新 GitHub Release 下载二进制或 Linux 安装包：
+
+- `lazycargo-linux-x86_64`
+- `lazycargo-linux-x86_64.tar.gz`
+- `lazycargo-macos-aarch64`
+- `lazycargo-macos-aarch64.tar.gz`
+- `lazycargo-windows-msvc-x86_64.exe`
+- `lazycargo-windows-msvc-x86_64.zip`
+- Linux `.deb` 和 `.rpm` 安装包
+
+Debian/Ubuntu：
+
+```bash
+sudo dpkg -i lazycargo_*.deb
+lazycargo
+```
+
+Fedora/RHEL/openSUSE：
+
+```bash
+sudo rpm -i lazycargo-*.rpm
+lazycargo
+```
+
+Windows 下载 `.zip`，解压后把 `lazycargo.exe` 放进 `PATH`。
+
+Homebrew Tap 发布后可以这样安装：
+
+```bash
+brew tap lildengzi/tap
+brew install lazycargo
+```
+
+或使用 Cargo 安装：
 
 ```bash
 cargo install lazycargo-tui

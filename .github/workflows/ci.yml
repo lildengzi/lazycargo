@@ -54,12 +54,15 @@ jobs:
           - os: ubuntu-latest
             artifact_name: lazycargo-linux-x86_64
             binary_path: target/release/lazycargo
+            package_linux: true
           - os: macos-latest
             artifact_name: lazycargo-macos-aarch64
             binary_path: target/release/lazycargo
+            package_macos: true
           - os: windows-latest
             artifact_name: lazycargo-windows-msvc-x86_64.exe
             binary_path: target/release/lazycargo.exe
+            package_windows: true
 
     steps:
       - name: Checkout
@@ -74,11 +77,64 @@ jobs:
       - name: Build release
         run: cargo build --workspace --release
 
+      - name: Build Linux packages
+        if: matrix.package_linux == true
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo deb -p lazycargo-tui --no-build
+          mkdir -p target/generate-rpm
+          (cd lazycargo_tui && cargo generate-rpm -o ../target/generate-rpm/lazycargo.rpm)
+          mkdir -p linux-packages
+          tar -czf linux-packages/lazycargo-linux-x86_64.tar.gz -C target/release lazycargo
+          cp target/debian/*.deb linux-packages/
+          cp target/generate-rpm/*.rpm linux-packages/
+
+      - name: Build macOS packages
+        if: matrix.package_macos == true
+        shell: bash
+        run: |
+          mkdir -p macos-package/out
+          tar -czf macos-package/out/lazycargo-macos-aarch64.tar.gz -C target/release lazycargo
+
+      - name: Build Windows archive
+        if: matrix.package_windows == true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows-package | Out-Null
+          Copy-Item target/release/lazycargo.exe windows-package/lazycargo.exe
+          Copy-Item README.md windows-package/README.md
+          Copy-Item LICENSE windows-package/LICENSE
+          Compress-Archive -Path windows-package/* -DestinationPath lazycargo-windows-msvc-x86_64.zip -Force
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.binary_path }}
+
+      - name: Upload Linux packages
+        if: matrix.package_linux == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazycargo-linux-packages
+          path: linux-packages/*
+
+      - name: Upload macOS packages
+        if: matrix.package_macos == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazycargo-macos-packages
+          path: macos-package/out/*
+
+      - name: Upload Windows archive
+        if: matrix.package_windows == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazycargo-windows-archive
+          path: lazycargo-windows-msvc-x86_64.zip
 
   github-release:
     name: publish GitHub release
@@ -99,6 +155,9 @@ jobs:
           cp dist/lazycargo-linux-x86_64/lazycargo release/lazycargo-linux-x86_64
           cp dist/lazycargo-macos-aarch64/lazycargo release/lazycargo-macos-aarch64
           cp dist/lazycargo-windows-msvc-x86_64.exe/lazycargo.exe release/lazycargo-windows-msvc-x86_64.exe
+          cp dist/lazycargo-linux-packages/* release/
+          cp dist/lazycargo-macos-packages/* release/
+          cp dist/lazycargo-windows-archive/* release/
           chmod +x release/lazycargo-linux-x86_64 release/lazycargo-macos-aarch64
           sha256sum release/* > release/SHA256SUMS
 
@@ -106,3 +165,137 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+
+  publish-crates:
+    name: publish crates.io
+    runs-on: ubuntu-latest
+    needs: github-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish search crate
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish -p lazycargo_search --locked
+
+      - name: Wait for crates.io index
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: sleep 60
+
+      - name: Publish TUI crate
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish -p lazycargo-tui --locked
+
+      - name: Skip crates.io publish
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: echo "CARGO_REGISTRY_TOKEN is not configured; skipping crates.io publish."
+
+  homebrew-tap-pr:
+    name: homebrew tap PR
+    runs-on: ubuntu-latest
+    needs: github-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+    steps:
+      - name: Download release artifacts
+        if: env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Compute formula values
+        if: env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != ''
+        id: formula
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          linux_archive="dist/lazycargo-linux-packages/lazycargo-linux-x86_64.tar.gz"
+          macos_archive="dist/lazycargo-macos-packages/lazycargo-macos-aarch64.tar.gz"
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "linux_sha=$(sha256sum "${linux_archive}" | awk '{print $1}')"
+            echo "macos_sha=$(sha256sum "${macos_archive}" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap
+        if: env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
+          token: ${{ env.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        if: env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != ''
+        shell: bash
+        run: |
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/lazycargo.rb <<'EOF'
+          class Lazycargo < Formula
+            desc "Lazygit-style Cargo workspace TUI for Rust projects"
+            homepage "https://github.com/lildengzi/lazycargo"
+            version "__VERSION__"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/lildengzi/lazycargo/releases/download/__TAG__/lazycargo-macos-aarch64.tar.gz"
+                sha256 "__MACOS_SHA__"
+              else
+                odie "lazycargo currently provides prebuilt macOS packages for Apple Silicon only"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/lildengzi/lazycargo/releases/download/__TAG__/lazycargo-linux-x86_64.tar.gz"
+                sha256 "__LINUX_SHA__"
+              else
+                odie "lazycargo currently provides prebuilt Linux packages for x86_64 only"
+              end
+            end
+
+            def install
+              bin.install "lazycargo"
+            end
+
+            test do
+              assert_match "lazycargo", shell_output("#{bin}/lazycargo --help")
+            end
+          end
+          EOF
+          sed -i \
+            -e 's/__VERSION__/${{ steps.formula.outputs.version }}/g' \
+            -e 's/__TAG__/${{ steps.formula.outputs.tag }}/g' \
+            -e 's/__MACOS_SHA__/${{ steps.formula.outputs.macos_sha }}/g' \
+            -e 's/__LINUX_SHA__/${{ steps.formula.outputs.linux_sha }}/g' \
+            homebrew-tap/Formula/lazycargo.rb
+
+      - name: Create tap pull request
+        if: env.HOMEBREW_TAP_REPOSITORY != '' && env.HOMEBREW_TAP_TOKEN != ''
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: homebrew-tap
+          token: ${{ env.HOMEBREW_TAP_TOKEN }}
+          branch: lazycargo-${{ github.ref_name }}
+          commit-message: Update lazycargo to ${{ github.ref_name }}
+          title: Update lazycargo to ${{ github.ref_name }}
+          body: Automated formula update for lazycargo ${{ github.ref_name }}.
+
+      - name: Skip Homebrew tap PR
+        if: env.HOMEBREW_TAP_REPOSITORY == '' || env.HOMEBREW_TAP_TOKEN == ''
+        run: echo "HOMEBREW_TAP_REPOSITORY or HOMEBREW_TAP_TOKEN is not configured; skipping Homebrew tap PR."
