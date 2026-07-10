@@ -220,7 +220,8 @@ impl App {
         output_store.insert(
             OutputSlot::DepsFeatures,
             ContextOutput::with_lines(vec![
-                "select dependency, then press t for tree or i for inverse tree".to_owned(),
+                "select dependency, then press t/i for offline tree or T/I to allow fetch"
+                    .to_owned(),
             ]),
         );
         output_store.insert(
@@ -714,8 +715,10 @@ impl App {
             }
             KeyCode::Char('c') => self.run_cargo(Focus::Build, &["check"]),
             KeyCode::Char('b') => self.run_cargo(Focus::Build, &["build"]),
-            KeyCode::Char('t') => self.run_tree(),
-            KeyCode::Char('i') => self.run_inverse_tree(),
+            KeyCode::Char('t') => self.run_tree(false),
+            KeyCode::Char('T') => self.run_tree(true),
+            KeyCode::Char('i') => self.run_inverse_tree(false),
+            KeyCode::Char('I') => self.run_inverse_tree(true),
             KeyCode::Char('a') => self.preview_add(),
             KeyCode::Char('o') if self.search.state.expanded => {
                 self.open_search_link(SearchLinkTarget::Crates)
@@ -1463,8 +1466,9 @@ impl App {
                 format!("dependency: {dependency}"),
                 String::new(),
                 "enter: inspect".to_owned(),
-                "t: cargo tree".to_owned(),
-                "i: cargo tree -i <dependency>".to_owned(),
+                "t: cargo tree --offline".to_owned(),
+                "i: cargo tree --offline -i <dependency>".to_owned(),
+                "T/I: allow Cargo to fetch missing registry packages".to_owned(),
                 "a: preview cargo add".to_owned(),
             ],
         );
@@ -1472,12 +1476,16 @@ impl App {
         self.navigation.deps_tab = DependenciesTab::Features;
     }
 
-    fn run_tree(&mut self) {
-        self.run_cargo(Focus::Dependencies, &["tree"]);
+    fn run_tree(&mut self, allow_fetch: bool) {
+        if allow_fetch {
+            self.run_cargo(Focus::Dependencies, &["tree"]);
+        } else {
+            self.run_cargo(Focus::Dependencies, &["tree", "--offline"]);
+        }
         self.navigation.deps_tab = DependenciesTab::DependencyTree;
     }
 
-    fn run_inverse_tree(&mut self) {
+    fn run_inverse_tree(&mut self, allow_fetch: bool) {
         let Some(dependency) = selected_dependency_name(
             &self.workspace.project,
             self.selection.workspace_selected,
@@ -1490,7 +1498,14 @@ impl App {
             return;
         };
 
-        self.run_cargo(Focus::Dependencies, &["tree", "-i", &dependency]);
+        if allow_fetch {
+            self.run_cargo(Focus::Dependencies, &["tree", "-i", &dependency]);
+        } else {
+            self.run_cargo(
+                Focus::Dependencies,
+                &["tree", "--offline", "-i", &dependency],
+            );
+        }
         self.navigation.deps_tab = DependenciesTab::DependencyTree;
     }
 
@@ -2176,7 +2191,8 @@ fn key_dialog_lines(app: &App) -> Vec<Line<'static>> {
         )]),
         key_line("Enter", "run selected action or inspect"),
         key_line("c / b", "cargo check / build"),
-        key_line("t / i", "tree / inverse tree"),
+        key_line("t / i", "offline tree / inverse tree"),
+        key_line("T / I", "tree / inverse tree with fetch"),
         key_line("s", "open search page"),
         key_line("/", "filter current panel"),
         key_line("m", "toggle terminal copy mode"),
