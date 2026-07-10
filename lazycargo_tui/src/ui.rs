@@ -536,6 +536,7 @@ impl App {
         ctx.lines = lines;
         ctx.stream_rx = None;
         ctx.scroll = 0;
+        ctx.follow_tail = false;
         if slot != OutputSlot::DepsTree {
             ctx.tree_nodes.clear();
         }
@@ -587,9 +588,26 @@ impl App {
     fn scroll_right(&mut self, delta: isize) {
         self.set_focus(Focus::Output);
         let slot = self.active_output_slot();
+        let content_len = output_lines(self).len();
         let scroll = {
             let ctx = self.output_for(slot);
-            ctx.scroll = (ctx.scroll as isize + delta).max(0) as usize;
+            let visible_rows = ctx.visible_rows.max(1);
+            let max_scroll = content_len.saturating_sub(visible_rows);
+            let current = if ctx.follow_tail {
+                max_scroll
+            } else {
+                ctx.scroll.min(max_scroll)
+            };
+            let next = if delta.is_negative() {
+                current.saturating_sub(delta.unsigned_abs())
+            } else {
+                current.saturating_add(delta as usize).min(max_scroll)
+            };
+            ctx.scroll = next;
+            ctx.follow_tail = next >= max_scroll;
+            if delta < 0 && max_scroll > 0 {
+                ctx.follow_tail = false;
+            }
             ctx.scroll
         };
         self.navigation.message = format!("right detail scroll: {scroll}");
@@ -613,7 +631,9 @@ impl App {
         let relative = row.saturating_sub(area.y) as usize;
         let track = area.height.saturating_sub(1).max(1) as usize;
         let scroll = (relative * max_scroll / track).min(max_scroll);
-        self.output_for(self.active_output_slot()).scroll = scroll;
+        let ctx = self.output_for(self.active_output_slot());
+        ctx.scroll = scroll;
+        ctx.follow_tail = scroll >= max_scroll;
         self.set_focus(Focus::Output);
         self.navigation.message = format!("right detail scroll: {scroll}");
         true
@@ -1028,7 +1048,8 @@ impl App {
             let ctx = self.output_for(slot);
             ctx.lines.clear();
             ctx.lines.push(format!("$ {command}"));
-            ctx.scroll = 0;
+            ctx.scroll = usize::MAX;
+            ctx.follow_tail = true;
             ctx.stream_rx = None;
             ctx.tree_nodes.clear();
         }
@@ -1895,6 +1916,7 @@ fn render_search_page(
     let detail_lines = app.search.state.selected_detail();
     let detail_len = detail_lines.len();
     let visible_rows = chunks[1].height.saturating_sub(2) as usize;
+    app.output_for(OutputSlot::SearchDetail).visible_rows = visible_rows;
     let detail_offset = app
         .output_store
         .get(&OutputSlot::SearchDetail)
@@ -2018,12 +2040,20 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: 
     let visible_rows = area.height.saturating_sub(2) as usize;
     let lines = output_lines(app);
     let slot = app.active_output_slot();
-    let offset = app
-        .output_store
-        .get(&slot)
-        .map(|ctx| ctx.scroll)
-        .unwrap_or(0)
-        .min(lines.len().saturating_sub(visible_rows));
+    let max_scroll = lines.len().saturating_sub(visible_rows);
+    let offset = {
+        let ctx = app.output_for(slot);
+        ctx.visible_rows = visible_rows;
+        if ctx.follow_tail {
+            ctx.scroll = max_scroll;
+        } else {
+            ctx.scroll = ctx.scroll.min(max_scroll);
+            if ctx.scroll >= max_scroll {
+                ctx.follow_tail = true;
+            }
+        }
+        ctx.scroll
+    };
     let rendered_lines: Vec<Line<'static>> = lines
         .iter()
         .skip(offset)

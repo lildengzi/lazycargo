@@ -69,6 +69,8 @@ pub(crate) struct ContextOutput {
     pub(crate) lines: Vec<String>,
     pub(crate) stream_rx: Option<mpsc::Receiver<OutputLine>>,
     pub(crate) scroll: usize,
+    pub(crate) follow_tail: bool,
+    pub(crate) visible_rows: usize,
     pub(crate) tree_nodes: Vec<DepNode>,
 }
 
@@ -78,6 +80,8 @@ impl ContextOutput {
             lines: Vec::new(),
             stream_rx: None,
             scroll: 0,
+            follow_tail: false,
+            visible_rows: 0,
             tree_nodes: Vec::new(),
         }
     }
@@ -87,6 +91,8 @@ impl ContextOutput {
             lines,
             stream_rx: None,
             scroll: 0,
+            follow_tail: false,
+            visible_rows: 0,
             tree_nodes: Vec::new(),
         }
     }
@@ -96,10 +102,12 @@ impl ContextOutput {
             return;
         };
         let mut disconnected = false;
+        let mut received = false;
         loop {
             match rx.try_recv() {
                 Ok(OutputLine::Stdout(line)) | Ok(OutputLine::Stderr(line)) => {
                     self.lines.push(line);
+                    received = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -110,6 +118,9 @@ impl ContextOutput {
         }
         if !disconnected {
             self.stream_rx = Some(rx);
+        }
+        if received && self.follow_tail {
+            self.scroll = usize::MAX;
         }
     }
 }
