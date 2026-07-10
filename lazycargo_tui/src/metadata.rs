@@ -86,6 +86,7 @@ impl DependencyKind {
 impl ProjectInfo {
     pub fn load() -> Result<Self, MetadataLoadError> {
         let metadata = MetadataCommand::new()
+            .no_deps()
             .exec()
             .map_err(|error| MetadataLoadError(format!("cargo metadata failed: {error}")))?;
 
