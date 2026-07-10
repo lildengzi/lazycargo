@@ -278,6 +278,14 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.process.child.is_some() {
+                self.kill_running_child();
+                return true;
+            }
+            return false;
+        }
+
         if self.navigation.menu_open {
             return self.handle_menu_key(key);
         }
@@ -645,9 +653,6 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.kill_running_child()
-            }
             KeyCode::Char('q') if self.search.state.expanded => {
                 self.search.state.expanded = false;
                 self.set_focus(self.navigation.search_return_focus);
