@@ -1483,15 +1483,7 @@ impl App {
         self.navigation.command_preview = format!("cargo tree -i {dependency}");
         self.set_slot_lines(
             OutputSlot::DepsFeatures,
-            vec![
-                format!("dependency: {dependency}"),
-                String::new(),
-                "enter: inspect".to_owned(),
-                "t: cargo tree --offline -e features".to_owned(),
-                "i: cargo tree --offline -e features -i <dependency>".to_owned(),
-                "T/I: allow Cargo to fetch missing registry packages".to_owned(),
-                "a: preview cargo add".to_owned(),
-            ],
+            vec![format!("selected: {dependency}")],
         );
         self.navigation.message = format!("selected dependency: {dependency}");
         self.navigation.deps_tab = DependenciesTab::Features;

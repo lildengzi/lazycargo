@@ -265,10 +265,11 @@ fn dependency_detail_lines(app: &App) -> Vec<String> {
     lines.extend([
         String::new(),
         "Actions".to_owned(),
-        "  enter: inspect selected dependency".to_owned(),
-        "  t: cargo tree".to_owned(),
-        "  i: cargo tree -i <dependency>".to_owned(),
-        "  m: terminal copy mode".to_owned(),
+        "  enter: inspect".to_owned(),
+        "  t: cargo tree --offline -e features".to_owned(),
+        "  i: cargo tree --offline -e features -i <dependency>".to_owned(),
+        "  T/I: allow Cargo to fetch missing registry packages".to_owned(),
+        "  a: preview cargo add".to_owned(),
     ]);
     lines.extend(app.output_lines_for(OutputSlot::DepsFeatures));
     lines

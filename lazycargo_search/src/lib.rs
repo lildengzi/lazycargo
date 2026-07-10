@@ -144,7 +144,12 @@ impl SearchState {
             return self.info_detail.clone();
         }
 
-        base_search_detail(result)
+        let mut detail = base_search_detail(result);
+        detail.insert(
+            2,
+            format!("match: {}", search_match_label(result, &self.query)),
+        );
+        detail
     }
 
     /// Cache expanded `cargo info` output for a crate.
@@ -436,6 +441,25 @@ fn search_rank(result: &CrateSearchResult, query: &str) -> (u8, String) {
     };
 
     (rank, name)
+}
+
+fn search_match_label(result: &CrateSearchResult, query: &str) -> &'static str {
+    let query = query.trim().to_lowercase();
+    let name = result.name.to_lowercase();
+    let description = result.description.to_lowercase();
+    if query.is_empty() {
+        "crates.io relevance"
+    } else if name == query {
+        "exact name"
+    } else if name.starts_with(&query) {
+        "name prefix"
+    } else if name.contains(&query) {
+        "name contains"
+    } else if description.contains(&query) {
+        "description match"
+    } else {
+        "crates.io relevance"
+    }
 }
 
 #[derive(Debug, Deserialize)]
