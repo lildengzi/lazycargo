@@ -25,6 +25,7 @@ impl DepNode {
 }
 
 pub fn parse_tree_output(output: &[String], expanded: &HashMap<String, bool>) -> Vec<DepNode> {
+    let features = collect_features(output);
     let mut parsed = output
         .iter()
         .filter_map(|line| parse_line(line))
@@ -57,6 +58,7 @@ pub fn parse_tree_output(output: &[String], expanded: &HashMap<String, bool>) ->
     }
 
     mark_duplicates(&mut roots);
+    apply_features(&mut roots, &features);
     roots
 }
 
@@ -220,7 +222,8 @@ fn apply_selected_inner(nodes: &mut [DepNode], selected: usize, index: &mut usiz
 }
 
 fn parse_line(line: &str) -> Option<DepNode> {
-    let trimmed = line.trim();
+    let clean = strip_ansi_codes(line);
+    let trimmed = clean.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('$')
         || trimmed.starts_with("exit:")
@@ -228,7 +231,7 @@ fn parse_line(line: &str) -> Option<DepNode> {
     {
         return None;
     }
-    let (depth, rest) = strip_tree_prefix(line)?;
+    let (depth, rest) = strip_tree_prefix(&clean)?;
     parse_package(rest.trim()).map(|(name, version)| DepNode {
         name,
         version,
@@ -243,6 +246,27 @@ fn parse_line(line: &str) -> Option<DepNode> {
         dependency_type: "normal".to_owned(),
         is_selected: false,
     })
+}
+
+fn strip_ansi_codes(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        if chars.peek() != Some(&'[') {
+            continue;
+        }
+        chars.next();
+        for next in chars.by_ref() {
+            if next.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    output
 }
 
 fn strip_tree_prefix(line: &str) -> Option<(usize, &str)> {
@@ -292,6 +316,35 @@ fn parse_package(rest: &str) -> Option<(String, String)> {
     Some((name, version))
 }
 
+fn collect_features(output: &[String]) -> BTreeMap<String, Vec<String>> {
+    let mut features = BTreeMap::<String, Vec<String>>::new();
+    for line in output {
+        let clean = strip_ansi_codes(line);
+        let Some((_, rest)) = strip_tree_prefix(&clean) else {
+            continue;
+        };
+        let Some((name, feature)) = parse_feature(rest.trim()) else {
+            continue;
+        };
+        features.entry(name).or_default().push(feature);
+    }
+    for values in features.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+    features
+}
+
+fn parse_feature(rest: &str) -> Option<(String, String)> {
+    let mut parts = rest.split_whitespace();
+    let name = parts.next()?.to_owned();
+    if !is_crate_name(&name) || parts.next()? != "feature" {
+        return None;
+    }
+    let feature = rest.split('"').nth(1)?.to_owned();
+    Some((name, feature))
+}
+
 fn parse_version_token(token: &str) -> Option<String> {
     let version = token.strip_prefix('v')?;
     is_version_like(version).then(|| version.to_owned())
@@ -333,6 +386,15 @@ fn mark_duplicates(nodes: &mut [DepNode]) {
         })
         .collect::<BTreeMap<_, _>>();
     apply_duplicates(nodes, &versions, &mut Vec::new());
+}
+
+fn apply_features(nodes: &mut [DepNode], features: &BTreeMap<String, Vec<String>>) {
+    for node in nodes {
+        if let Some(values) = features.get(&node.name) {
+            node.features = values.clone();
+        }
+        apply_features(&mut node.children, features);
+    }
 }
 
 fn collect_versions(nodes: &[DepNode], versions: &mut BTreeMap<String, Vec<String>>) {
@@ -410,5 +472,45 @@ mod tests {
 
         assert!(visible.iter().all(|node| node.name != "2.8.2"));
         assert!(visible.iter().any(|node| node.name == "memchr"));
+    }
+
+    #[test]
+    fn attaches_feature_lines_to_matching_crates() {
+        let lines = vec![
+            "anyhow v1.0.102".to_owned(),
+            "├── anyhow feature \"default\"".to_owned(),
+            "│   └── zx_tracker v0.3.0 (/tmp/ZXTracker)".to_owned(),
+            "└── anyhow feature \"std\"".to_owned(),
+            "    └── anyhow feature \"default\" (*)".to_owned(),
+        ];
+
+        let nodes = parse_tree_output(&lines, &HashMap::new());
+        let visible = flatten_visible(&nodes);
+        let anyhow = visible
+            .iter()
+            .find(|node| node.name == "anyhow")
+            .expect("anyhow node");
+
+        assert_eq!(anyhow.features, vec!["default", "std"]);
+    }
+
+    #[test]
+    fn parses_ansi_colored_feature_tree_output() {
+        let lines = vec![
+            "anyhow v1.0.102".to_owned(),
+            "\u{1b}[2m\u{1b}[35m├──\u{1b}[0m anyhow feature \"default\"".to_owned(),
+            "\u{1b}[2m\u{1b}[35m│\u{1b}[0m   \u{1b}[2m└──\u{1b}[0m zx_tracker v0.3.0 (/tmp/ZXTracker)".to_owned(),
+            "\u{1b}[2m\u{1b}[35m└──\u{1b}[0m anyhow feature \"std\"".to_owned(),
+        ];
+
+        let nodes = parse_tree_output(&lines, &HashMap::new());
+        let visible = flatten_visible(&nodes);
+        let anyhow = visible
+            .iter()
+            .find(|node| node.name == "anyhow")
+            .expect("anyhow node");
+
+        assert_eq!(anyhow.features, vec!["default", "std"]);
+        assert!(visible.iter().any(|node| node.name == "zx_tracker"));
     }
 }

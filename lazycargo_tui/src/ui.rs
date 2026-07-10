@@ -1466,8 +1466,8 @@ impl App {
                 format!("dependency: {dependency}"),
                 String::new(),
                 "enter: inspect".to_owned(),
-                "t: cargo tree --offline".to_owned(),
-                "i: cargo tree --offline -i <dependency>".to_owned(),
+                "t: cargo tree --offline -e features".to_owned(),
+                "i: cargo tree --offline -e features -i <dependency>".to_owned(),
                 "T/I: allow Cargo to fetch missing registry packages".to_owned(),
                 "a: preview cargo add".to_owned(),
             ],
@@ -1478,9 +1478,12 @@ impl App {
 
     fn run_tree(&mut self, allow_fetch: bool) {
         if allow_fetch {
-            self.run_cargo(Focus::Dependencies, &["tree"]);
+            self.run_cargo(Focus::Dependencies, &["tree", "-e", "features"]);
         } else {
-            self.run_cargo(Focus::Dependencies, &["tree", "--offline"]);
+            self.run_cargo(
+                Focus::Dependencies,
+                &["tree", "--offline", "-e", "features"],
+            );
         }
         self.navigation.deps_tab = DependenciesTab::DependencyTree;
     }
@@ -1499,11 +1502,14 @@ impl App {
         };
 
         if allow_fetch {
-            self.run_cargo(Focus::Dependencies, &["tree", "-i", &dependency]);
+            self.run_cargo(
+                Focus::Dependencies,
+                &["tree", "-e", "features", "-i", &dependency],
+            );
         } else {
             self.run_cargo(
                 Focus::Dependencies,
-                &["tree", "--offline", "-i", &dependency],
+                &["tree", "--offline", "-e", "features", "-i", &dependency],
             );
         }
         self.navigation.deps_tab = DependenciesTab::DependencyTree;
