@@ -22,7 +22,7 @@ cargo_metadata = "0.19"
 chrono.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
-lazycargo_search = { path = "../lazycargo_search", version = "0.1.1" }
+lazycargo_search = { path = "../lazycargo_search", version = "0.2.0" }
 open = "5.3"
 ratatui.workspace = true
 serde.workspace = true

@@ -1,0 +1,28 @@
+# Maintainer: lildengzi <lildengzi@users.noreply.github.com>
+pkgname=lazycargo
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="A lazygit-style Cargo workspace TUI for Rust projects"
+arch=('x86_64' 'aarch64')
+url="https://github.com/lildengzi/lazycargo"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo' 'rust')
+source=("$pkgname::git+https://github.com/lildengzi/lazycargo.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  git describe --tags --abbrev=0 2>/dev/null || echo "0.2.0"
+}
+
+build() {
+  cd "$pkgname"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 target/release/lazycargo "$pkgdir/usr/bin/lazycargo"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
