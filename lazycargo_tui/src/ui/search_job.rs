@@ -38,29 +38,26 @@ pub(super) enum SearchJobKind {
 pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJobResult {
     let command = format!("crates.io api search {query}");
     let started = Instant::now();
-    match search_crates_registry(&query, config.network_timeout, config.limit) {
-        Ok(results) => {
-            let duration = started.elapsed();
-            let detail = vec![
-                format!("$ {command}"),
-                format!("duration: {:.2}s", duration.as_secs_f32()),
-                format!("results: {}", results.len()),
-                format!("progress: {}", progress_bar(1.0, 20)),
-                String::new(),
-                "source: https://crates.io/api/v1/crates".to_owned(),
-            ];
-            return SearchJobResult {
-                kind: SearchJobKind::Search,
-                command,
-                duration,
-                success: true,
-                results: Some(results),
-                detail,
-                message: format!("searched crates: {query}"),
-                status: format!("search ok {:.2}s", duration.as_secs_f32()),
-            };
-        }
-        Err(_) => {}
+    if let Ok(results) = search_crates_registry(&query, config.network_timeout, config.limit) {
+        let duration = started.elapsed();
+        let detail = vec![
+            format!("$ {command}"),
+            format!("duration: {:.2}s", duration.as_secs_f32()),
+            format!("results: {}", results.len()),
+            format!("progress: {}", progress_bar(1.0, 20)),
+            String::new(),
+            "source: https://crates.io/api/v1/crates".to_owned(),
+        ];
+        return SearchJobResult {
+            kind: SearchJobKind::Search,
+            command,
+            duration,
+            success: true,
+            results: Some(results),
+            detail,
+            message: format!("searched crates: {query}"),
+            status: format!("search ok {:.2}s", duration.as_secs_f32()),
+        };
     }
 
     let limit = config.limit.clamp(1, 100).to_string();
