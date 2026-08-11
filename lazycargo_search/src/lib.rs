@@ -103,8 +103,8 @@ impl SearchState {
             .iter()
             .map(|result| {
                 format!(
-                    "{:<24} {:<10} {:>8} {}",
-                    result.name,
+                    "{:<22} {:<9} {:>8} {}",
+                    truncate_middle(&result.name, 22),
                     result.version,
                     result
                         .downloads
@@ -154,6 +154,12 @@ impl SearchState {
 
     /// Cache expanded `cargo info` output for a crate.
     pub fn set_info_detail(&mut self, name: String, detail: Vec<String>) {
+        self.info_name = Some(name);
+        self.info_detail = detail;
+    }
+
+    /// Show transient detail for the selected result without changing the result list.
+    pub fn set_selected_detail(&mut self, name: String, detail: Vec<String>) {
         self.info_name = Some(name);
         self.info_detail = detail;
     }
@@ -221,59 +227,58 @@ impl SearchState {
 
 /// Build the default detail panel for a search result.
 pub fn base_search_detail(result: &CrateSearchResult) -> Vec<String> {
-    let mut lines = vec![
-        format!("crate: {}", result.name),
-        format!("version: {}", result.version),
-        format!("description: {}", result.description),
-        String::new(),
-    ];
-    if let Some(downloads) = result.downloads {
-        lines.push(format!("downloads: {}", format_count(downloads)));
-    }
-    if let Some(downloads) = result.recent_downloads {
-        lines.push(format!("recent downloads: {}", format_count(downloads)));
-    }
+    let mut lines = vec![format!("crate: {}", result.name)];
+    lines.extend(wrapped_field("description", &result.description, 14, 72));
+    lines.push(field_line("version", &result.version));
+    lines.push(field_line(
+        "downloads",
+        &result
+            .downloads
+            .map(format_count)
+            .unwrap_or_else(|| "-".to_owned()),
+    ));
+    lines.push(field_line(
+        "recent",
+        &result
+            .recent_downloads
+            .map(format_count)
+            .unwrap_or_else(|| "-".to_owned()),
+    ));
     if let Some(updated_at) = &result.updated_at {
-        lines.push(format!("updated: {updated_at}"));
-    }
-    if result.downloads.is_some()
-        || result.recent_downloads.is_some()
-        || result.updated_at.is_some()
-    {
-        lines.push(String::new());
+        lines.push(field_line("updated", updated_at));
     }
     if let Some(author) = &result.author {
-        lines.push(format!("author: {author}"));
-        lines.push(String::new());
+        lines.push(field_line("author", author));
     }
+    lines.push(String::new());
     lines.push("Links".to_owned());
-    lines.push(format!(
-        "  crates.io: https://crates.io/crates/{}",
-        result.name
+    lines.extend(wrapped_field(
+        "crates.io",
+        &format!("https://crates.io/crates/{}", result.name),
+        14,
+        72,
     ));
     let docs_url = result
         .documentation
         .clone()
         .unwrap_or_else(|| default_docs_url(&result.name));
-    lines.push(format!("  docs.rs: {docs_url}"));
+    lines.extend(wrapped_field("docs.rs", &docs_url, 14, 72));
     if let Some(homepage) = &result.homepage {
-        lines.push(format!("  homepage: {homepage}"));
+        lines.extend(wrapped_field("homepage", homepage, 14, 72));
     }
     if let Some(repository) = &result.repository {
-        lines.push(format!("  repository: {repository}"));
+        lines.extend(wrapped_field("repository", repository, 14, 72));
     } else {
-        lines.push("  repository: <not declared by crates.io>".to_owned());
+        lines.push(field_line("repository", "<not declared by crates.io>"));
     }
     lines.extend([
         String::new(),
         "Actions".to_owned(),
-        "  enter: inspect with cargo info".to_owned(),
-        "  a: preview cargo add for selected crate".to_owned(),
-        "  o: open crates.io".to_owned(),
-        "  d: open docs".to_owned(),
-        "  g: open repository".to_owned(),
-        "  y: copy this detail".to_owned(),
-        "  s: search again".to_owned(),
+        "  enter  cargo info".to_owned(),
+        "  a      preview cargo add".to_owned(),
+        "  o/d/g  open crates/docs/repo".to_owned(),
+        "  y      copy detail".to_owned(),
+        "  s      search again".to_owned(),
     ]);
     lines
 }
@@ -308,7 +313,7 @@ pub fn crate_info_detail(result: &CrateSearchResult, report: &CrateInfoReport<'_
                 .filter(|line| !is_link_or_author_line(line)),
         );
     } else if report.timeout {
-        detail.push("cargo info timed out after 8s".to_owned());
+        detail.push("cargo info timed out".to_owned());
         detail.push(
             "likely cause: crates.io registry update, network, or proxy is unavailable".to_owned(),
         );
@@ -326,7 +331,7 @@ pub fn search_timeout_detail(command: &str, duration_secs: f32) -> Vec<String> {
         format!("$ {command}"),
         format!("duration: {duration_secs:.2}s"),
         String::new(),
-        "cargo search timed out after 10s".to_owned(),
+        "cargo search timed out".to_owned(),
         "likely cause: crates.io, network, or proxy is unavailable".to_owned(),
     ]
 }
@@ -337,21 +342,26 @@ pub fn search_error_detail(command: &str, error: &str) -> Vec<String> {
 }
 
 /// Search crates.io through the first-party HTTP API.
-pub fn search_crates_registry(query: &str) -> Result<Vec<CrateSearchResult>, CrateSearchError> {
+pub fn search_crates_registry(
+    query: &str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<Vec<CrateSearchResult>, CrateSearchError> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
     }
+    let limit = limit.clamp(1, 100).to_string();
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .user_agent("lazycargo (https://github.com/lildengzi/lazycargo)")
         .build()
         .map_err(|error| CrateSearchError(format!("failed to build HTTP client: {error}")))?;
 
     let response = client
         .get("https://crates.io/api/v1/crates")
-        .query(&[("q", query), ("per_page", "100")])
+        .query(&[("q", query), ("per_page", limit.as_str())])
         .send()
         .map_err(|error| CrateSearchError(format!("crates.io request failed: {error}")))?;
 
@@ -544,6 +554,63 @@ fn non_empty(value: Option<String>) -> Option<String> {
 
 fn default_docs_url(name: &str) -> String {
     format!("https://docs.rs/{name}")
+}
+
+fn field_line(label: &str, value: &str) -> String {
+    format!("{label:<13} {value}")
+}
+
+fn wrapped_field(label: &str, value: &str, indent: usize, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let prefix = format!("{label:<13} ");
+    let continuation = " ".repeat(indent);
+    let available = width.saturating_sub(indent).max(16);
+    for (index, chunk) in wrap_text(value, available).into_iter().enumerate() {
+        if index == 0 {
+            lines.push(format!("{prefix}{chunk}"));
+        } else {
+            lines.push(format!("{continuation}{chunk}"));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(format!("{prefix}-"));
+    }
+    lines
+}
+
+fn wrap_text(value: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in value.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = word.to_owned();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() && !value.is_empty() {
+        lines.push(value.chars().take(width).collect());
+    }
+    lines
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars <= 1 {
+        return "…".to_owned();
+    }
+    let head = max_chars.saturating_sub(1);
+    format!("{}…", value.chars().take(head).collect::<String>())
 }
 
 fn format_count(value: u64) -> String {
@@ -800,7 +867,7 @@ mod tests {
 
         assert!(detail
             .iter()
-            .any(|line| line == "  repository: https://github.com/new/demo"));
+            .any(|line| line == "repository    https://github.com/new/demo"));
         assert!(!detail.iter().any(|line| line.contains("github.com/old")));
         assert!(detail.iter().any(|line| line == "license: MIT"));
     }

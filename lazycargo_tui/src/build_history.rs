@@ -56,9 +56,9 @@ impl BuildHistory {
         fs::write(&self.db_path, text).map_err(|error| error.to_string())
     }
 
-    pub fn add_entry(&mut self, entry: BuildEntry) -> Result<(), String> {
+    pub fn add_entry(&mut self, entry: BuildEntry, limit: usize) -> Result<(), String> {
         self.entries.insert(0, entry);
-        self.entries.truncate(500);
+        self.entries.truncate(limit.max(1));
         self.save()
     }
 

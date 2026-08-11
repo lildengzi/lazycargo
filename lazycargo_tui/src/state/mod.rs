@@ -30,7 +30,6 @@ pub(crate) struct NavigationState {
     pub(crate) menu_open: bool,
     pub(crate) menu_selected: usize,
     pub(crate) filter: String,
-    pub(crate) new_project_name: String,
     pub(crate) search_return_focus: Focus,
     pub(crate) command_preview: String,
     pub(crate) message: String,
@@ -42,6 +41,7 @@ pub(crate) struct SelectionState {
     pub(crate) workspace_selected: usize,
     pub(crate) dependency_selected: usize,
     pub(crate) build_selected: usize,
+    pub(crate) target_crate_selected: usize,
     pub(crate) tree_selected: usize,
     pub(crate) tree_expanded: HashMap<String, bool>,
 }
@@ -97,7 +97,7 @@ impl ContextOutput {
         }
     }
 
-    pub(crate) fn drain_stream(&mut self) {
+    pub(crate) fn drain_stream(&mut self, max_lines: usize) {
         let Some(rx) = self.stream_rx.take() else {
             return;
         };
@@ -119,9 +119,20 @@ impl ContextOutput {
         if !disconnected {
             self.stream_rx = Some(rx);
         }
+        self.trim_lines(max_lines);
         if received && self.follow_tail {
             self.scroll = usize::MAX;
         }
+    }
+
+    pub(crate) fn trim_lines(&mut self, max_lines: usize) {
+        let max_lines = max_lines.max(1);
+        let overflow = self.lines.len().saturating_sub(max_lines);
+        if overflow == 0 {
+            return;
+        }
+        self.lines.drain(..overflow);
+        self.scroll = self.scroll.saturating_sub(overflow);
     }
 }
 

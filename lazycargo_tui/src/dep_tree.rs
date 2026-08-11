@@ -228,6 +228,7 @@ fn parse_line(line: &str) -> Option<DepNode> {
         || trimmed.starts_with('$')
         || trimmed.starts_with("exit:")
         || trimmed.starts_with("duration:")
+        || trimmed.contains("(*)")
     {
         return None;
     }
@@ -512,5 +513,33 @@ mod tests {
 
         assert_eq!(anyhow.features, vec!["default", "std"]);
         assert!(visible.iter().any(|node| node.name == "zx_tracker"));
+    }
+
+    #[test]
+    fn skips_repeated_cargo_tree_subtrees() {
+        let lines = vec![
+            "zx_tracker v0.3.0 (/tmp/ZXTracker)".to_owned(),
+            "├── chrono feature \"default\"".to_owned(),
+            "│   ├── chrono v0.4.45".to_owned(),
+            "│   ├── chrono feature \"clock\"".to_owned(),
+            "│   │   ├── chrono v0.4.45 (*)".to_owned(),
+            "│   │   └── chrono feature \"std\"".to_owned(),
+            "│   │       └── chrono v0.4.45 (*)".to_owned(),
+            "│   └── chrono feature \"std\" (*)".to_owned(),
+        ];
+
+        let nodes = parse_tree_output(&lines, &HashMap::new());
+        let visible = flatten_visible(&nodes);
+        let chrono_nodes = visible
+            .iter()
+            .filter(|node| node.name == "chrono" && node.version == "0.4.45")
+            .count();
+        let chrono = visible
+            .iter()
+            .find(|node| node.name == "chrono")
+            .expect("chrono node");
+
+        assert_eq!(chrono_nodes, 1);
+        assert_eq!(chrono.features, vec!["clock", "default", "std"]);
     }
 }

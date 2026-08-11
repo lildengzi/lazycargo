@@ -8,10 +8,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ansi_to_tui::IntoText as _;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -21,17 +20,18 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::build_history::{is_recordable_command, BuildEntry, BuildHistory, CrateTiming};
 use crate::cargo_task::{
     CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
 };
+use crate::config::AppConfig;
 use crate::dep_tree;
+use crate::keymap::{
+    self, NormalKeyAction, NormalKeyContext, ProjectNewConfirmAction, TextInputAction,
+};
 use crate::metadata::ProjectInfo;
 use crate::state::{
     ContextOutput, NavigationState, OutputSlot, ProcessState, SearchModel, SelectionState,
@@ -39,19 +39,26 @@ use crate::state::{
 };
 use crate::target_analyzer::{self, DiskSnapshot};
 use crate::util::format_bytes;
-use lazycargo_search::{
-    crate_info_detail, extract_crate_author, parse_crate_search_results, search_crates_registry,
-    search_error_detail, search_timeout_detail, CrateInfoReport, SearchLinkTarget, SearchState,
-};
+use lazycargo_search::{SearchLinkTarget, SearchState};
 
 mod dashboard;
+mod layout;
 pub(crate) mod runner;
+mod search_job;
+mod style;
 mod terminal_support;
 
-use dashboard::{
-    apply_filter, build_items, dependency_items_for, list_offset, output_lines, workspace_items,
+use dashboard::{build_items, dependency_items_for, output_lines, workspace_items};
+use layout::{
+    render_command_log, render_menu, render_panel, render_project_new_confirm, render_scrollbar,
+    render_search_input,
 };
-use runner::{command_output_with_timeout, extract_diagnostics, spawn_streaming, split_output};
+use runner::{extract_diagnostics, spawn_streaming};
+use search_job::{
+    info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
+    SearchJobKind, SearchJobResult,
+};
+use style::{output_line_to_lines, panel_block, semantic_output_line};
 use terminal_support::{copy_to_clipboard, first_url, open_url};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +110,7 @@ pub(crate) enum InputMode {
     Normal,
     Filter,
     CrateSearch,
-    ProjectNew,
+    ProjectNewConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,22 +170,6 @@ impl ContextTab {
     }
 }
 
-struct UiText {
-    keys_title: &'static str,
-    version_label: &'static str,
-    status_label: &'static str,
-    close_keys: &'static str,
-}
-
-fn ui_text() -> UiText {
-    UiText {
-        keys_title: "Keys",
-        version_label: "Version",
-        status_label: "status",
-        close_keys: "Esc/x/Enter",
-    }
-}
-
 struct HistoryEntry {
     command: String,
     success: bool,
@@ -196,20 +187,26 @@ struct MouseState {
 }
 
 struct App {
+    config: AppConfig,
     workspace: WorkspaceModel,
     navigation: NavigationState,
     selection: SelectionState,
     process: ProcessState,
     output_store: HashMap<OutputSlot, ContextOutput>,
     search: SearchModel,
+    search_receiver: Option<Receiver<SearchJobResult>>,
+    search_started: Option<Instant>,
     history: Vec<HistoryEntry>,
 }
 
 impl App {
-    fn new(project: ProjectInfo) -> Self {
+    fn new(project: ProjectInfo, config: AppConfig) -> Self {
         let command_preview = "cargo check".to_owned();
         let disk = DiskSnapshot::pending(&project.packages);
-        let disk_receiver = Some(load_disk_snapshot_async(project.clone()));
+        let disk_receiver = Some(load_disk_snapshot_async(
+            project.clone(),
+            config.target_stale_days,
+        ));
         let output = project_health_snapshot(&project, &disk);
         let mut output_store = HashMap::new();
         output_store.insert(OutputSlot::BuildLive, ContextOutput::with_lines(output));
@@ -233,6 +230,7 @@ impl App {
             ContextOutput::with_lines(vec!["no package action yet".to_owned()]),
         );
         Self {
+            config,
             workspace: WorkspaceModel {
                 project,
                 disk,
@@ -250,7 +248,6 @@ impl App {
                 menu_open: false,
                 menu_selected: 0,
                 filter: String::new(),
-                new_project_name: String::new(),
                 search_return_focus: Focus::Workspace,
                 command_preview,
                 message: "ready".to_owned(),
@@ -261,6 +258,7 @@ impl App {
                 workspace_selected: 0,
                 dependency_selected: 0,
                 build_selected: 0,
+                target_crate_selected: 0,
                 tree_selected: 0,
                 tree_expanded: HashMap::new(),
             },
@@ -274,12 +272,14 @@ impl App {
             search: SearchModel {
                 state: SearchState::default(),
             },
+            search_receiver: None,
+            search_started: None,
             history: Vec::new(),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if keymap::is_ctrl_c(key) {
             if self.process.child.is_some() {
                 self.kill_running_child();
                 return true;
@@ -295,7 +295,7 @@ impl App {
             InputMode::Normal => self.handle_normal_key(key),
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::CrateSearch => self.handle_crate_search_key(key),
-            InputMode::ProjectNew => self.handle_project_new_key(key),
+            InputMode::ProjectNewConfirm => self.handle_project_new_confirm_key(key),
         }
     }
 
@@ -307,39 +307,119 @@ impl App {
             return;
         };
         self.workspace.disk = snapshot;
+        self.selection.target_crate_selected = self
+            .selection
+            .target_crate_selected
+            .min(self.workspace.disk.by_crate.len().saturating_sub(1));
         self.workspace.disk_receiver = None;
         if self.navigation.last_status == "ready" {
             self.navigation.last_status = "disk snapshot ready".to_owned();
         }
     }
 
+    fn poll_search_job(&mut self) {
+        if self.search_receiver.is_some() {
+            let elapsed = self
+                .search_started
+                .map(|started| started.elapsed())
+                .unwrap_or_default();
+            if let Some(name) = self.search_info_pending_name() {
+                self.search
+                    .state
+                    .set_selected_detail(name.clone(), info_progress_detail(&name, elapsed));
+            } else {
+                self.search
+                    .state
+                    .set_empty_detail(search_progress_detail(&self.search.state.query, elapsed));
+            }
+        }
+        let Some(receiver) = &self.search_receiver else {
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        self.search_receiver = None;
+        self.search_started = None;
+        match result.kind {
+            SearchJobKind::Search => {
+                if let Some(results) = result.results {
+                    self.search.state.set_results(results);
+                } else {
+                    self.search.state.set_empty_detail(result.detail.clone());
+                }
+            }
+            SearchJobKind::Info { name, author } => {
+                if let Some(author) = author {
+                    self.search.state.set_selected_author(author);
+                }
+                self.search
+                    .state
+                    .set_info_detail(name, result.detail.clone());
+                self.record_crate_inspection(
+                    result.command.clone(),
+                    result.duration,
+                    result.success,
+                );
+            }
+        }
+        self.set_slot_lines(OutputSlot::SearchDetail, result.detail);
+        self.navigation.last_status = result.status;
+        self.navigation.message = result.message;
+        self.history.insert(
+            0,
+            HistoryEntry {
+                command: result.command,
+                success: result.success,
+                duration: result.duration,
+            },
+        );
+        self.history.truncate(self.config.command_history_limit);
+    }
+
+    fn search_info_pending_name(&self) -> Option<String> {
+        let command = &self.navigation.command_preview;
+        command
+            .strip_prefix("cargo info ")
+            .map(str::to_owned)
+            .filter(|name| !name.is_empty())
+    }
+
     fn refresh_disk_snapshot(&mut self) {
-        self.workspace.disk_receiver =
-            Some(load_disk_snapshot_async(self.workspace.project.clone()));
+        self.workspace.disk_receiver = Some(load_disk_snapshot_async(
+            self.workspace.project.clone(),
+            self.config.target_stale_days,
+        ));
         self.navigation.message = "refreshing target analysis".to_owned();
         self.navigation.last_status = "target refresh".to_owned();
     }
 
     fn clean_target_stale(&mut self, dry_run: bool) {
         let root = Path::new(&self.workspace.project.workspace_root);
-        match target_analyzer::clean_stale(root, dry_run) {
-            Ok(lines) => {
+        match target_analyzer::clean_stale(root, dry_run, self.config.target_stale_days) {
+            Ok(report) => {
                 let output = std::iter::once(if dry_run {
                     "Target clean dry-run".to_owned()
                 } else {
                     "Target clean stale".to_owned()
                 })
+                .chain(std::iter::once(format!(
+                    "threshold: {} days, artifacts: {}, total: {}",
+                    self.config.target_stale_days,
+                    report.artifact_count,
+                    format_bytes(report.total_size)
+                )))
                 .chain(std::iter::once(String::new()))
-                .chain(lines.clone())
+                .chain(report.lines.clone())
                 .collect();
                 self.set_slot_lines(OutputSlot::WorkspaceTarget, output);
                 self.navigation.ws_tab = WorkspaceTab::Target;
                 self.navigation.current_focus = FocusPanel::Workspace;
                 self.set_focus(Focus::Output);
                 self.navigation.message = if dry_run {
-                    format!("dry-run: {} stale artifacts", lines.len())
+                    format!("dry-run: {} stale artifacts", report.artifact_count)
                 } else {
-                    format!("cleaned: {} stale artifacts", lines.len())
+                    format!("cleaned: {} stale artifacts", report.artifact_count)
                 };
                 self.navigation.last_status = "target clean".to_owned();
                 if !dry_run {
@@ -532,8 +612,10 @@ impl App {
     }
 
     fn set_slot_lines(&mut self, slot: OutputSlot, lines: Vec<String>) {
+        let max_lines = self.config.output_max_lines;
         let ctx = self.output_for(slot);
         ctx.lines = lines;
+        ctx.trim_lines(max_lines);
         ctx.stream_rx = None;
         ctx.scroll = 0;
         ctx.follow_tail = false;
@@ -673,33 +755,35 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Char('q') if self.search.state.expanded => {
+        let context = NormalKeyContext {
+            search_expanded: self.search.state.expanded,
+            focus: self.navigation.focus,
+            ws_tab: self.navigation.ws_tab,
+            deps_tab: self.navigation.deps_tab,
+        };
+        match keymap::normal_key_action(key, context) {
+            NormalKeyAction::BackFromSearch => {
                 self.search.state.expanded = false;
                 self.set_focus(self.navigation.search_return_focus);
                 self.navigation.message = "back from search".to_owned();
             }
-            KeyCode::Esc if self.search.state.expanded => {
-                self.search.state.expanded = false;
-                self.set_focus(self.navigation.search_return_focus);
-                self.navigation.message = "back from search".to_owned();
-            }
-            KeyCode::Char('q') => return false,
-            KeyCode::Char('x') => {
+            NormalKeyAction::Quit => return false,
+            NormalKeyAction::OpenKeys => {
                 self.navigation.menu_open = true;
                 self.navigation.menu_selected = 0;
             }
-            KeyCode::Tab => self.set_focus(self.navigation.focus.next()),
-            KeyCode::BackTab => self.set_focus(Focus::Output),
-            KeyCode::Char(']') => self.switch_context_tab(1),
-            KeyCode::Char('[') => self.switch_context_tab(-1),
-            KeyCode::Char('m') => self.toggle_copy_mode(),
-            KeyCode::Char('0') => self.set_focus(Focus::Output),
-            KeyCode::Char(value @ ('1'..='3')) => self.set_focus(Focus::from_digit(value)),
-            KeyCode::PageUp => self.scroll_right(-10),
-            KeyCode::PageDown => self.scroll_right(10),
-            KeyCode::Up | KeyCode::Char('k') if self.navigation.focus == Focus::Output => {
-                if self.navigation.deps_tab == DependenciesTab::DependencyTree
+            NormalKeyAction::FocusNext => self.set_focus(self.navigation.focus.next()),
+            NormalKeyAction::FocusOutput => self.set_focus(Focus::Output),
+            NormalKeyAction::SwitchTab(delta) => self.switch_context_tab(delta),
+            NormalKeyAction::ToggleCopyMode => self.toggle_copy_mode(),
+            NormalKeyAction::FocusDigit(value) => self.set_focus(Focus::from_digit(value)),
+            NormalKeyAction::ScrollRight(delta) => self.scroll_right(delta),
+            NormalKeyAction::OutputUp => {
+                if self.navigation.current_focus == FocusPanel::Workspace
+                    && self.navigation.ws_tab == WorkspaceTab::Target
+                {
+                    self.move_target_crate_selection(-1);
+                } else if self.navigation.deps_tab == DependenciesTab::DependencyTree
                     && self.navigation.current_focus == FocusPanel::Dependencies
                 {
                     self.move_tree_selection(-1);
@@ -707,8 +791,12 @@ impl App {
                     self.scroll_right(-1);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') if self.navigation.focus == Focus::Output => {
-                if self.navigation.deps_tab == DependenciesTab::DependencyTree
+            NormalKeyAction::OutputDown => {
+                if self.navigation.current_focus == FocusPanel::Workspace
+                    && self.navigation.ws_tab == WorkspaceTab::Target
+                {
+                    self.move_target_crate_selection(1);
+                } else if self.navigation.deps_tab == DependenciesTab::DependencyTree
                     && self.navigation.current_focus == FocusPanel::Dependencies
                 {
                     self.move_tree_selection(1);
@@ -716,77 +804,56 @@ impl App {
                     self.scroll_right(1);
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Enter => self.activate_selection(),
-            KeyCode::Char('/') => {
+            NormalKeyAction::MoveUp => self.move_selection(-1),
+            NormalKeyAction::MoveDown => self.move_selection(1),
+            NormalKeyAction::Activate => self.activate_selection(),
+            NormalKeyAction::OpenFilter => {
                 self.navigation.input_mode = InputMode::Filter;
                 self.navigation.filter.clear();
                 self.navigation.message = format!("filter {}: ", self.navigation.focus.title());
             }
-            KeyCode::Char('r') if self.navigation.ws_tab == WorkspaceTab::Target => {
-                self.refresh_disk_snapshot()
-            }
-            KeyCode::Char('d') if self.navigation.ws_tab == WorkspaceTab::Target => {
-                self.clean_target_stale(true)
-            }
-            KeyCode::Char('c') if self.navigation.ws_tab == WorkspaceTab::Target => {
-                self.clean_target_stale(false)
-            }
-            KeyCode::Char('c') => self.run_cargo(Focus::Build, &["check"]),
-            KeyCode::Char('b') => self.run_cargo(Focus::Build, &["build"]),
-            KeyCode::Char('t') => self.run_tree(false),
-            KeyCode::Char('T') => self.run_tree(true),
-            KeyCode::Char('i') => self.run_inverse_tree(false),
-            KeyCode::Char('I') => self.run_inverse_tree(true),
-            KeyCode::Char('a') => self.preview_add(),
-            KeyCode::Char('o') if self.search.state.expanded => {
-                self.open_search_link(SearchLinkTarget::Crates)
-            }
-            KeyCode::Char('d') if self.search.state.expanded => {
-                self.open_search_link(SearchLinkTarget::Docs)
-            }
-            KeyCode::Char('g') if self.search.state.expanded => {
-                self.open_search_link(SearchLinkTarget::Repository)
-            }
-            KeyCode::Char('y') if self.search.state.expanded => self.copy_search_detail(),
-            KeyCode::Left | KeyCode::Char('h')
-                if self.navigation.deps_tab == DependenciesTab::DependencyTree =>
-            {
-                self.collapse_selected_tree_node()
-            }
-            KeyCode::Right | KeyCode::Char('l')
-                if self.navigation.deps_tab == DependenciesTab::DependencyTree =>
-            {
-                self.toggle_selected_tree_node()
-            }
-            KeyCode::Char('s') => {
+            NormalKeyAction::RefreshTarget => self.refresh_disk_snapshot(),
+            NormalKeyAction::DryRunCleanTarget => self.clean_target_stale(true),
+            NormalKeyAction::CleanTarget => self.clean_target_stale(false),
+            NormalKeyAction::CargoCheck => self.run_cargo(Focus::Build, &["check"]),
+            NormalKeyAction::CargoBuild => self.run_cargo(Focus::Build, &["build"]),
+            NormalKeyAction::TreeOffline => self.run_tree(false),
+            NormalKeyAction::TreeWithFetch => self.run_tree(true),
+            NormalKeyAction::InverseTreeOffline => self.run_inverse_tree(false),
+            NormalKeyAction::InverseTreeWithFetch => self.run_inverse_tree(true),
+            NormalKeyAction::PreviewAdd => self.preview_add(),
+            NormalKeyAction::OpenCrates => self.open_search_link(SearchLinkTarget::Crates),
+            NormalKeyAction::OpenDocs => self.open_search_link(SearchLinkTarget::Docs),
+            NormalKeyAction::OpenRepository => self.open_search_link(SearchLinkTarget::Repository),
+            NormalKeyAction::CopySearchDetail => self.copy_search_detail(),
+            NormalKeyAction::CollapseTree => self.collapse_selected_tree_node(),
+            NormalKeyAction::ToggleTree => self.toggle_selected_tree_node(),
+            NormalKeyAction::OpenSearch => {
                 self.open_search();
                 self.navigation.message = "search crates".to_owned();
             }
-            _ => {}
+            NormalKeyAction::Noop => {}
         }
 
         true
     }
 
     fn handle_menu_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('x') | KeyCode::Enter => self.navigation.menu_open = false,
-            _ => {}
+        if keymap::menu_closes(key) {
+            self.navigation.menu_open = false;
         }
 
         true
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
+        match keymap::text_input_action(key) {
+            TextInputAction::Cancel => {
                 self.navigation.input_mode = InputMode::Normal;
                 self.navigation.filter.clear();
                 self.navigation.message = "filter cancelled".to_owned();
             }
-            KeyCode::Enter => {
+            TextInputAction::Submit => {
                 self.navigation.input_mode = InputMode::Normal;
                 self.navigation.message = format!(
                     "filter applied to {}: {}",
@@ -794,23 +861,23 @@ impl App {
                     self.navigation.filter
                 );
             }
-            KeyCode::Backspace => {
+            TextInputAction::Backspace => {
                 self.navigation.filter.pop();
             }
-            KeyCode::Char(value) => self.navigation.filter.push(value),
-            _ => {}
+            TextInputAction::Push(value) => self.navigation.filter.push(value),
+            TextInputAction::Noop => {}
         }
 
         true
     }
 
     fn handle_crate_search_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
+        match keymap::text_input_action(key) {
+            TextInputAction::Cancel => {
                 self.navigation.input_mode = InputMode::Normal;
                 self.navigation.message = "search input blurred".to_owned();
             }
-            KeyCode::Enter => {
+            TextInputAction::Submit => {
                 let query = self.search.state.query.trim().to_owned();
                 self.navigation.input_mode = InputMode::Normal;
                 if query.is_empty() {
@@ -819,61 +886,31 @@ impl App {
                     self.search_crates(&query);
                 }
             }
-            KeyCode::Backspace => {
+            TextInputAction::Backspace => {
                 self.search.state.query.pop();
             }
-            KeyCode::Char(value) => self.search.state.query.push(value),
-            _ => {}
+            TextInputAction::Push(value) => self.search.state.query.push(value),
+            TextInputAction::Noop => {}
         }
 
         true
     }
 
-    fn handle_project_new_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
+    fn handle_project_new_confirm_key(&mut self, key: KeyEvent) -> bool {
+        match keymap::project_new_confirm_action(key) {
+            ProjectNewConfirmAction::Yes => {
                 self.navigation.input_mode = InputMode::Normal;
-                self.navigation.new_project_name.clear();
-                self.navigation.message = "cargo new cancelled".to_owned();
+                self.run_cargo(Focus::Build, &["init"]);
             }
-            KeyCode::Enter => {
-                let name = self.navigation.new_project_name.trim().to_owned();
+            ProjectNewConfirmAction::No => {
                 self.navigation.input_mode = InputMode::Normal;
-                if name.is_empty() {
-                    self.navigation.message = "cargo new requires a project name".to_owned();
-                } else {
-                    self.navigation.new_project_name.clear();
-                    self.run_cargo(Focus::Build, &["new", &name]);
-                }
+                self.navigation.message = "project creation skipped".to_owned();
+                self.navigation.last_status = "limited mode".to_owned();
             }
-            KeyCode::Backspace => {
-                self.navigation.new_project_name.pop();
-            }
-            KeyCode::Char(value) => self.navigation.new_project_name.push(value),
-            _ => {}
+            ProjectNewConfirmAction::Noop => {}
         }
 
         true
-    }
-
-    fn open_project_new_input(&mut self) {
-        self.navigation.input_mode = InputMode::ProjectNew;
-        self.navigation.new_project_name.clear();
-        self.set_focus(Focus::Build);
-        self.navigation.build_tab = BuildCoreTab::TaskConfig;
-        self.navigation.command_preview = "cargo new <name>".to_owned();
-        self.navigation.message = "new project name: ".to_owned();
-        self.set_slot_lines(
-            OutputSlot::BuildConfig,
-            vec![
-                "Create new Cargo project".to_owned(),
-                String::new(),
-                "$ cargo new <name>".to_owned(),
-                String::new(),
-                "Type a project directory name in the status bar, then press Enter.".to_owned(),
-                "Esc cancels without creating anything.".to_owned(),
-            ],
-        );
     }
 
     fn preview(&mut self, command: &str) {
@@ -975,6 +1012,38 @@ impl App {
         }
     }
 
+    fn move_target_crate_selection(&mut self, delta: isize) {
+        let len = self
+            .workspace
+            .disk
+            .by_crate
+            .len()
+            .min(self.config.target_top_crates);
+        if len == 0 {
+            self.scroll_right(delta);
+            return;
+        }
+        self.selection.target_crate_selected =
+            (self.selection.target_crate_selected as isize + delta)
+                .clamp(0, len.saturating_sub(1) as isize) as usize;
+        self.navigation.message =
+            format!("target crate {}", self.selection.target_crate_selected + 1);
+    }
+
+    fn inspect_target_crate(&mut self) {
+        let Some(item) = self
+            .workspace
+            .disk
+            .by_crate
+            .get(self.selection.target_crate_selected)
+        else {
+            self.navigation.message = "no target crate selected".to_owned();
+            return;
+        };
+        self.navigation.message = format!("target crate: {} {}", item.name, item.label);
+        self.navigation.last_status = format!("target {}", item.label);
+    }
+
     fn activate_selection(&mut self) {
         match self.navigation.focus {
             Focus::Workspace => {
@@ -987,6 +1056,12 @@ impl App {
             Focus::Dependencies => self.inspect_dependency(),
             Focus::Output if self.navigation.deps_tab == DependenciesTab::DependencyTree => {
                 self.toggle_selected_tree_node()
+            }
+            Focus::Output
+                if self.navigation.current_focus == FocusPanel::Workspace
+                    && self.navigation.ws_tab == WorkspaceTab::Target =>
+            {
+                self.inspect_target_crate()
             }
             Focus::Search => {
                 if self.navigation.input_mode == InputMode::CrateSearch
@@ -1012,7 +1087,6 @@ impl App {
                 Some("doc") => self.run_cargo(Focus::Build, &["doc", "--no-deps"]),
                 Some("update") => self.run_cargo(Focus::Build, &["update"]),
                 Some("clean") => self.run_cargo(Focus::Build, &["clean"]),
-                Some("new") => self.open_project_new_input(),
                 Some("timings") => self.run_cargo(Focus::Build, &["build", "--timings"]),
                 Some("diagnostics") => self.navigation.build_tab = BuildCoreTab::LiveOutput,
                 _ => {}
@@ -1072,8 +1146,9 @@ impl App {
     }
 
     fn drain_all_streams(&mut self) {
+        let max_lines = self.config.output_max_lines;
         for ctx in self.output_store.values_mut() {
-            ctx.drain_stream();
+            ctx.drain_stream(max_lines);
         }
 
         let Some(child) = &mut self.process.child else {
@@ -1089,7 +1164,7 @@ impl App {
                 let command = std::mem::take(&mut self.process.command);
                 let duration = self.process.start.elapsed();
                 let slot = self.process.slot;
-                self.output_for(slot).drain_stream();
+                self.output_for(slot).drain_stream(max_lines);
                 self.output_for(slot).stream_rx = None;
                 self.finish_cargo_output(slot, command, duration, status);
             }
@@ -1135,8 +1210,11 @@ impl App {
                 duration,
             },
         );
-        self.history.truncate(20);
+        self.history.truncate(self.config.command_history_limit);
         self.record_build_history(&command, duration, success);
+        if success && is_project_init_command(&command) {
+            self.reload_project_after_init();
+        }
         if slot == OutputSlot::DepsTree {
             self.update_dependency_tree_from_output();
         }
@@ -1157,7 +1235,11 @@ impl App {
             rustc_version: self.workspace.project.rustc_version.clone(),
             crate_timings: latest_crate_timings(Path::new(&self.workspace.project.workspace_root)),
         };
-        if let Err(error) = self.workspace.build_history.add_entry(entry) {
+        if let Err(error) = self
+            .workspace
+            .build_history
+            .add_entry(entry, self.config.build_history_limit)
+        {
             self.workspace
                 .diagnostics
                 .push(format!("failed to save build history: {error}"));
@@ -1248,8 +1330,9 @@ impl App {
         self.navigation.last_status = "killed".to_owned();
         let slot = self.process.slot;
         let command = std::mem::take(&mut self.process.command);
+        let max_lines = self.config.output_max_lines;
         let ctx = self.output_for(slot);
-        ctx.drain_stream();
+        ctx.drain_stream(max_lines);
         ctx.stream_rx = None;
         ctx.lines.push(format!("killed: {command}"));
         self.process.command.clear();
@@ -1322,7 +1405,7 @@ impl App {
             return result;
         };
 
-        if command == "new" {
+        if matches!(command, "init" | "new") {
             return result;
         }
 
@@ -1357,113 +1440,61 @@ impl App {
         }
     }
 
+    fn reload_project_after_init(&mut self) {
+        match ProjectInfo::load() {
+            Ok(project) => {
+                self.workspace.project = project;
+                self.selection.workspace_selected = 0;
+                self.selection.dependency_selected = 0;
+                self.workspace.disk = DiskSnapshot::pending(&self.workspace.project.packages);
+                self.workspace.disk_receiver = Some(load_disk_snapshot_async(
+                    self.workspace.project.clone(),
+                    self.config.target_stale_days,
+                ));
+                self.navigation.message = "Cargo project initialized".to_owned();
+                self.navigation.last_status = "project ready".to_owned();
+                self.navigation.current_focus = FocusPanel::Workspace;
+                self.navigation.ws_tab = WorkspaceTab::CrateInfo;
+            }
+            Err(error) => {
+                self.navigation.message = format!("initialized, but reload failed: {error}");
+                self.navigation.last_status = "reload failed".to_owned();
+            }
+        }
+    }
+
     fn search_crates(&mut self, query: &str) {
+        if self.search_receiver.is_some() {
+            self.navigation.message = "search already running".to_owned();
+            return;
+        }
+        let query = query.to_owned();
         let command = format!("crates.io api search {query}");
         self.navigation.command_preview = command.clone();
         self.navigation.message = format!("searching crates: {query}");
         self.navigation.focus = Focus::Search;
         self.search.state.expanded = true;
-
-        let started = Instant::now();
-        match search_crates_registry(query) {
-            Ok(results) => {
-                let duration = started.elapsed();
-                let lines = vec![
-                    format!("$ {command}"),
-                    format!("duration: {:.2}s", duration.as_secs_f32()),
-                    format!("results: {}", results.len()),
-                    String::new(),
-                    "source: https://crates.io/api/v1/crates".to_owned(),
-                ];
-                self.search.state.set_results(results);
-                self.set_slot_lines(OutputSlot::SearchDetail, lines);
-                self.navigation.last_status = format!("search ok {:.2}s", duration.as_secs_f32());
-                self.history.insert(
-                    0,
-                    HistoryEntry {
-                        command,
-                        success: true,
-                        duration,
-                    },
-                );
-                self.history.truncate(20);
-                self.navigation.message = format!("searched crates: {query}");
-                return;
-            }
-            Err(error) => {
-                self.navigation.message =
-                    format!("api search failed, trying cargo search: {error}");
-            }
-        }
-
-        let command = format!("cargo search {query} --limit 100");
-        self.navigation.command_preview = command.clone();
-        let started = Instant::now();
-        let output = command_output_with_timeout(
-            "cargo",
-            &["search", query, "--limit", "100"],
-            Duration::from_secs(10),
+        self.search
+            .state
+            .set_empty_detail(search_progress_detail(&query, Duration::from_secs(0)));
+        self.set_slot_lines(
+            OutputSlot::SearchDetail,
+            search_progress_detail(&query, Duration::from_secs(0)),
         );
-        let duration = started.elapsed();
+        let (tx, rx) = mpsc::channel();
+        self.search_receiver = Some(rx);
+        self.search_started = Some(Instant::now());
+        let config = self.search_job_config();
+        thread::spawn(move || {
+            let _ = tx.send(run_search_job(query, config));
+        });
+    }
 
-        match output {
-            Ok(Some(output)) => {
-                let mut lines = Vec::new();
-                lines.push(format!("$ {command}"));
-                lines.push(format!("exit: {}", output.status));
-                lines.push(format!("duration: {:.2}s", duration.as_secs_f32()));
-                lines.push(String::new());
-                lines.extend(split_output(&output.stdout));
-                lines.extend(split_output(&output.stderr));
-
-                let success = output.status.success();
-                self.navigation.last_status = if success {
-                    format!("search ok {:.2}s", duration.as_secs_f32())
-                } else {
-                    format!("search failed {:.2}s", duration.as_secs_f32())
-                };
-                if success {
-                    self.search
-                        .state
-                        .set_results(parse_crate_search_results(&lines, query));
-                } else {
-                    self.search.state.set_empty_detail(lines.clone());
-                }
-                self.set_slot_lines(OutputSlot::SearchDetail, lines.clone());
-                self.history.insert(
-                    0,
-                    HistoryEntry {
-                        command,
-                        success,
-                        duration,
-                    },
-                );
-                self.history.truncate(20);
-                self.navigation.message = format!("searched crates: {query}");
-            }
-            Ok(None) => {
-                let lines = search_timeout_detail(&command, duration.as_secs_f32());
-                self.navigation.last_status = "search timeout".to_owned();
-                self.search.state.set_empty_detail(lines.clone());
-                self.set_slot_lines(OutputSlot::SearchDetail, lines.clone());
-                self.history.insert(
-                    0,
-                    HistoryEntry {
-                        command,
-                        success: false,
-                        duration,
-                    },
-                );
-                self.history.truncate(20);
-                self.navigation.message = format!("search timed out: {query}");
-            }
-            Err(error) => {
-                self.navigation.last_status = "search error".to_owned();
-                let lines = search_error_detail(&command, &error.to_string());
-                self.search.state.set_empty_detail(lines.clone());
-                self.set_slot_lines(OutputSlot::SearchDetail, lines);
-                self.navigation.message = format!("crate search failed: {query}");
-            }
+    fn search_job_config(&self) -> SearchJobConfig {
+        SearchJobConfig {
+            limit: self.config.search_limit,
+            network_timeout: self.config.network_timeout(),
+            info_timeout: self.config.cargo_info_timeout(),
         }
     }
 
@@ -1555,6 +1586,10 @@ impl App {
     }
 
     fn inspect_selected_crate(&mut self) {
+        if self.search_receiver.is_some() {
+            self.navigation.message = "search task already running".to_owned();
+            return;
+        }
         let Some(result) = self.search.state.selected_result().cloned() else {
             self.set_slot_lines(
                 OutputSlot::SearchDetail,
@@ -1567,76 +1602,18 @@ impl App {
         self.navigation.command_preview = command.clone();
         self.navigation.message = format!("inspecting crate: {}", result.name);
         self.search.state.expanded = true;
-
-        let started = Instant::now();
-        let output =
-            command_output_with_timeout("cargo", &["info", &result.name], Duration::from_secs(8));
-        let duration = started.elapsed();
-
-        let detail;
-        match output {
-            Ok(Some(output)) => {
-                let mut lines = split_output(&output.stdout);
-                lines.extend(split_output(&output.stderr));
-                let success = output.status.success();
-                self.navigation.last_status = if success {
-                    format!("info ok {:.2}s", duration.as_secs_f32())
-                } else {
-                    format!("info failed {:.2}s", duration.as_secs_f32())
-                };
-                if let Some(author) = extract_crate_author(&lines) {
-                    self.search.state.set_selected_author(author);
-                }
-                detail = crate_info_detail(
-                    &result,
-                    &CrateInfoReport {
-                        command: &command,
-                        duration_secs: duration.as_secs_f32(),
-                        status: Some(output.status.to_string()),
-                        lines: &lines,
-                        timeout: false,
-                        error: None,
-                    },
-                );
-                self.record_crate_inspection(command.clone(), duration, success);
-            }
-            Ok(None) => {
-                self.navigation.last_status = "info timeout".to_owned();
-                detail = crate_info_detail(
-                    &result,
-                    &CrateInfoReport {
-                        command: &command,
-                        duration_secs: duration.as_secs_f32(),
-                        status: None,
-                        lines: &[],
-                        timeout: true,
-                        error: None,
-                    },
-                );
-                self.record_crate_inspection(command.clone(), duration, false);
-            }
-            Err(error) => {
-                self.navigation.last_status = "info error".to_owned();
-                detail = crate_info_detail(
-                    &result,
-                    &CrateInfoReport {
-                        command: &command,
-                        duration_secs: duration.as_secs_f32(),
-                        status: None,
-                        lines: &[],
-                        timeout: false,
-                        error: Some(error.to_string()),
-                    },
-                );
-                self.record_crate_inspection(command.clone(), duration, false);
-            }
-        }
-
+        let detail = info_progress_detail(&result.name, Duration::from_secs(0));
         self.search
             .state
-            .set_info_detail(result.name.clone(), detail.clone());
+            .set_selected_detail(result.name.clone(), detail.clone());
         self.set_slot_lines(OutputSlot::SearchDetail, detail);
-        self.navigation.message = format!("inspected crate: {}", result.name);
+        let (tx, rx) = mpsc::channel();
+        self.search_receiver = Some(rx);
+        self.search_started = Some(Instant::now());
+        let config = self.search_job_config();
+        thread::spawn(move || {
+            let _ = tx.send(run_info_job(result, config));
+        });
     }
 
     fn record_crate_inspection(&mut self, command: String, duration: Duration, success: bool) {
@@ -1648,7 +1625,7 @@ impl App {
                 duration,
             },
         );
-        self.history.truncate(20);
+        self.history.truncate(self.config.command_history_limit);
     }
 
     fn open_search_link(&mut self, target: SearchLinkTarget) {
@@ -1698,6 +1675,19 @@ impl App {
 }
 
 pub fn run() -> io::Result<()> {
+    let (config, config_message) = match AppConfig::load_or_create() {
+        Ok(config) => (
+            config,
+            Some(format!(
+                "config: {}",
+                AppConfig::config_path().to_string_lossy()
+            )),
+        ),
+        Err(error) => (
+            AppConfig::default(),
+            Some(format!("config load failed, using defaults: {error}")),
+        ),
+    };
     let (project, startup_message) = match ProjectInfo::load() {
         Ok(project) => (project, None),
         Err(error) => (
@@ -1706,10 +1696,13 @@ pub fn run() -> io::Result<()> {
         ),
     };
     let mut terminal = setup_terminal()?;
-    let mut app = App::new(project);
+    let mut app = App::new(project, config);
+    if let Some(message) = config_message {
+        app.navigation.message = message;
+    }
     if let Some(message) = startup_message {
         app.navigation.last_status = "limited mode".to_owned();
-        app.navigation.message = "limited mode: cargo new is available".to_owned();
+        app.navigation.message = "no Cargo project: initialize here? y/n".to_owned();
         app.set_slot_lines(
             OutputSlot::BuildLive,
             vec![
@@ -1718,14 +1711,21 @@ pub fn run() -> io::Result<()> {
                 message,
                 String::new(),
                 "This directory is not a Cargo project yet.".to_owned(),
-                "Use [2]-Build Core -> new project to run cargo new <name>.".to_owned(),
+                "Press y to initialize the current directory with cargo init.".to_owned(),
+                "Press n or Esc to stay in limited mode.".to_owned(),
                 "Search is also available with s.".to_owned(),
             ],
         );
+        app.navigation.input_mode = InputMode::ProjectNewConfirm;
+        app.navigation.command_preview = "cargo init".to_owned();
     }
     let result = run_app(&mut terminal, &mut app);
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn is_project_init_command(command: &str) -> bool {
+    command == "cargo init" || command.starts_with("cargo init ")
 }
 
 fn fallback_project_info() -> ProjectInfo {
@@ -1768,6 +1768,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     let mut mouse_state = MouseState::default();
     loop {
         app.poll_disk_snapshot();
+        app.poll_search_job();
         app.drain_all_streams();
         terminal.draw(|frame| {
             mouse_state = render(frame, app);
@@ -1814,6 +1815,9 @@ fn render(frame: &mut Frame<'_>, app: &mut App) -> MouseState {
     render_command_log(frame, app, root[1]);
     if app.navigation.menu_open {
         render_menu(frame, app);
+    }
+    if app.navigation.input_mode == InputMode::ProjectNewConfirm {
+        render_project_new_confirm(frame);
     }
     mouse_state
 }
@@ -1937,7 +1941,7 @@ fn render_search_page(
         .into_iter()
         .skip(detail_offset)
         .take(visible_rows)
-        .map(Line::from)
+        .map(|line| semantic_output_line(&line))
         .collect::<Vec<_>>();
     let detail_title = if app.navigation.copy_mode {
         "Search Detail  [copy mode]"
@@ -1966,66 +1970,6 @@ fn render_search_page(
         visible_rows,
         detail_offset,
     );
-}
-
-fn render_search_input(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let style = if app.navigation.input_mode == InputMode::CrateSearch {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let input = if app.search.state.query.is_empty() {
-        "type crate name, Enter to search".to_owned()
-    } else {
-        app.search.state.query.clone()
-    };
-    let widget = Paragraph::new(Line::from(input))
-        .block(
-            Block::default()
-                .title(Span::styled("Search", style))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(style),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(widget, area);
-}
-
-fn render_panel(
-    frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    focus: Focus,
-    lines: Vec<String>,
-    selected: usize,
-) -> usize {
-    let lines = apply_filter(lines, &app.navigation.filter, app.navigation.focus == focus);
-    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
-    let offset = list_offset(selected, visible_rows, lines.len());
-    let items = lines
-        .into_iter()
-        .skip(offset)
-        .take(visible_rows)
-        .enumerate()
-        .map(|(index, line)| {
-            let real_index = offset + index;
-            let style = if app.navigation.focus == focus && real_index == selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(line)).style(style)
-        })
-        .collect::<Vec<_>>();
-
-    let widget = List::new(items).block(panel_block(focus.title(), app.navigation.focus == focus));
-    frame.render_widget(widget, area);
-    offset
 }
 
 fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: &mut MouseState) {
@@ -2067,29 +2011,6 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: 
     mouse_state.right_scrollbar_content_len = lines.len();
     mouse_state.right_scrollbar_visible_rows = visible_rows;
     render_scrollbar(frame, scrollbar_area, lines.len(), visible_rows, offset);
-}
-
-fn render_scrollbar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    content_len: usize,
-    visible_rows: usize,
-    scroll_offset: usize,
-) {
-    if content_len <= visible_rows {
-        return;
-    }
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None)
-        .track_symbol(Some("│"))
-        .thumb_symbol("█")
-        .track_style(Style::default().fg(Color::DarkGray))
-        .thumb_style(Style::default().fg(Color::Green));
-    let mut scrollbar_state = ScrollbarState::new(content_len)
-        .position(scroll_offset)
-        .viewport_content_length(visible_rows);
-    frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 fn output_block(app: &mut App, area: Rect, mouse_state: &mut MouseState) -> Block<'static> {
@@ -2168,187 +2089,6 @@ fn embedded_tab_areas(app: &App, area: Rect) -> Vec<(Rect, ContextTab)> {
     areas
 }
 
-fn render_menu(frame: &mut Frame<'_>, app: &mut App) {
-    let text = ui_text();
-    let area = centered_rect(70, 64, frame.area());
-    let lines = key_dialog_lines(app);
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .title(Span::styled(
-                text.keys_title,
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Green)),
-    );
-    frame.render_widget(Clear, area);
-    frame.render_widget(widget, area);
-}
-
-fn key_dialog_lines(app: &App) -> Vec<Line<'static>> {
-    let text = ui_text();
-    let version = env!("CARGO_PKG_VERSION");
-    vec![
-        Line::from(vec![Span::styled(
-            "Navigation",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        key_line("1 / 2 / 3", "focus workspace / build / deps"),
-        key_line("0 / click", "focus right waterfall"),
-        key_line("Tab", "cycle focus"),
-        key_line("j/k arrows", "move selection or scroll focused pane"),
-        key_line("PgUp/PgDn", "scroll right waterfall"),
-        Line::from(vec![Span::styled(
-            "Tabs",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        key_line("[ / ]", "switch Detail / Output / Tree / Metrics"),
-        key_line("click tab", "switch right tab"),
-        Line::from(vec![Span::styled(
-            "Actions",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        key_line("Enter", "run selected action or inspect"),
-        key_line("c / b", "cargo check / build"),
-        key_line("t / i", "offline tree / inverse tree"),
-        key_line("T / I", "tree / inverse tree with fetch"),
-        key_line("s", "open search page"),
-        key_line("/", "filter current panel"),
-        key_line("m", "toggle terminal copy mode"),
-        key_line("q", "back or quit"),
-        Line::from(vec![Span::styled(
-            "Search",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        key_line("Enter", "search input or inspect result"),
-        key_line("a", "preview cargo add"),
-        key_line("o/d/g", "open crates/docs/repo"),
-        key_line("y", "copy selected detail"),
-        Line::from(vec![
-            Span::styled(
-                format!("{}  ", text.version_label),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(version.to_owned()),
-            Span::raw("    "),
-            Span::styled(text.close_keys, Style::default().fg(Color::Green)),
-            Span::raw(" close"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("{}  ", text.status_label),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(app.navigation.last_status.clone()),
-        ]),
-    ]
-}
-
-fn key_line(key: &'static str, label: &'static str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{key:<12}"), Style::default().fg(Color::Green)),
-        Span::raw(label),
-    ])
-}
-
-fn render_command_log(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let version_text = format!(" v{}", env!("CARGO_PKG_VERSION"));
-    let version_width = version_text.len() as u16;
-    let version_x = area
-        .x
-        .saturating_add(area.width.saturating_sub(version_width));
-
-    let line = match app.navigation.input_mode {
-        InputMode::CrateSearch => Line::from(vec![
-            Span::styled("search: ", Style::default().fg(Color::Yellow)),
-            Span::raw("Enter search, Esc results, q back, x keys"),
-            Span::styled(
-                format!("  {}", app.navigation.last_status),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        InputMode::Filter => Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.navigation.filter),
-            Span::styled(
-                "  Enter apply, Esc cancel",
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        InputMode::ProjectNew => Line::from(vec![
-            Span::styled("new: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.navigation.new_project_name),
-            Span::styled(
-                "  Enter create, Esc cancel",
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        InputMode::Normal if app.navigation.copy_mode => Line::from(vec![
-            Span::styled("copy: ", Style::default().fg(Color::Yellow)),
-            Span::raw("drag select, m mouse, x keys"),
-            Span::styled(
-                format!("  {}", app.navigation.last_status),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        InputMode::Normal if app.search.state.expanded => Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(": inspect, "),
-            Span::styled("a", Style::default().fg(Color::Green)),
-            Span::raw(": add, "),
-            Span::styled("q", Style::default().fg(Color::Green)),
-            Span::raw(": back, "),
-            Span::styled("x", Style::default().fg(Color::Green)),
-            Span::raw(": keys"),
-            Span::styled(
-                format!("  {}", app.navigation.last_status),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        InputMode::Normal => Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(": run/inspect, "),
-            Span::styled("s", Style::default().fg(Color::Green)),
-            Span::raw(": search, "),
-            Span::styled("[ ]", Style::default().fg(Color::Green)),
-            Span::raw(": tabs, "),
-            Span::styled("x", Style::default().fg(Color::Green)),
-            Span::raw(": keys, "),
-            Span::styled("q", Style::default().fg(Color::Green)),
-            Span::raw(": quit"),
-            Span::styled(
-                format!("  {}", app.navigation.last_status),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-    };
-
-    frame.render_widget(Paragraph::new(line), area);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            version_text,
-            Style::default().fg(Color::Green),
-        ))),
-        Rect {
-            x: version_x,
-            y: area.y,
-            width: version_width,
-            height: 1,
-        },
-    );
-}
-
 fn selected_dependency_name(
     project: &ProjectInfo,
     workspace_selected: usize,
@@ -2373,30 +2113,8 @@ fn selected_dependency_name(
         .map(|dependency| dependency.name.clone())
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
-}
-
 fn project_health_snapshot(project: &ProjectInfo, disk: &DiskSnapshot) -> Vec<String> {
     vec![
-        "Project health snapshot".to_owned(),
-        String::new(),
         format!("project: {} {}", project.name, project.version),
         format!("workspace root: {}", project.workspace_root),
         format!("rustc: {}", project.rustc_version),
@@ -2421,11 +2139,15 @@ fn project_health_snapshot(project: &ProjectInfo, disk: &DiskSnapshot) -> Vec<St
     ]
 }
 
-fn load_disk_snapshot_async(project: ProjectInfo) -> Receiver<DiskSnapshot> {
+fn load_disk_snapshot_async(project: ProjectInfo, stale_days: u64) -> Receiver<DiskSnapshot> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let root = Path::new(&project.workspace_root);
-        let _ = tx.send(target_analyzer::analyze_target(root, &project.packages));
+        let _ = tx.send(target_analyzer::analyze_target(
+            root,
+            &project.packages,
+            stale_days,
+        ));
     });
     rx
 }
@@ -2518,221 +2240,9 @@ fn collect_crate_timings(value: &serde_json::Value, timings: &mut Vec<CrateTimin
     }
 }
 
-fn output_line_to_lines(line: &String) -> Vec<Line<'static>> {
-    if line.contains('\u{1b}') {
-        return line
-            .into_text()
-            .map(|text| text.lines)
-            .unwrap_or_else(|_| vec![semantic_output_line(line)]);
-    }
-    vec![semantic_output_line(line)]
-}
-
-fn semantic_output_line(raw: &str) -> Line<'static> {
-    let trimmed = raw.trim();
-    let lower = trimmed.to_lowercase();
-
-    if trimmed.is_empty() {
-        return Line::from(String::new());
-    }
-
-    if let Some(line) = feature_marker_line(raw) {
-        return line;
-    }
-    if lower.starts_with('$') {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default().fg(Color::Magenta),
-        ));
-    }
-    if lower.starts_with("exit:") || lower.starts_with("duration:") {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    if lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("panic")
-        || lower.contains("exit status: 1")
-    {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if lower.contains("warning") || lower.contains("unused") {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if looks_like_tree_line(raw) {
-        return tree_output_line(raw);
-    }
-    if first_url(raw).is_some() {
-        return url_output_line(raw);
-    }
-    if is_section_heading(trimmed) {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some((key, value)) = raw.split_once(':') {
-        return key_value_line(key, value);
-    }
-    if lower.contains(" v") || lower.starts_with("version ") || lower.starts_with("version:") {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default().fg(Color::Gray),
-        ));
-    }
-    if lower.contains('/') && (lower.starts_with("  ") || lower.starts_with('(')) {
-        return Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    Line::from(raw.to_owned())
-}
-
-fn feature_marker_line(raw: &str) -> Option<Line<'static>> {
-    let marker_index = raw.find('[')?;
-    let marker = raw.get(marker_index..marker_index.saturating_add(3))?;
-    let style = match marker {
-        "[x]" => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        "[-]" => Style::default().fg(Color::Yellow),
-        "[ ]" => Style::default().fg(Color::DarkGray),
-        _ => return None,
-    };
-    Some(Line::from(vec![
-        Span::raw(raw[..marker_index].to_owned()),
-        Span::styled(marker.to_owned(), style),
-        Span::styled(raw[marker_index + 3..].to_owned(), style),
-    ]))
-}
-
-fn is_section_heading(trimmed: &str) -> bool {
-    matches!(
-        trimmed,
-        "Actions"
-            | "Build"
-            | "Cargo metrics"
-            | "Dependencies"
-            | "Disk"
-            | "Disk tracking"
-            | "Effect"
-            | "Feature state"
-            | "Health snapshot"
-            | "Hot paths"
-            | "Links"
-            | "Local path"
-            | "Members"
-            | "Package disk snapshot"
-            | "Package identity"
-            | "Project health snapshot"
-            | "Targets"
-            | "Workspace metrics"
-            | "Workspace scope"
-    )
-}
-
-fn key_value_line(key: &str, value: &str) -> Line<'static> {
-    let value_style = if value.contains("http://") || value.contains("https://") {
-        Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::UNDERLINED)
-    } else if value.contains('/') {
-        Style::default().fg(Color::Cyan)
-    } else if value.contains("unknown") || value.contains("<") {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
-    Line::from(vec![
-        Span::styled(
-            key.to_owned(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(":"),
-        Span::styled(value.to_owned(), value_style),
-    ])
-}
-
-fn url_output_line(raw: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    for part in raw.split_inclusive(' ') {
-        let style = if part.starts_with("http://") || part.starts_with("https://") {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::UNDERLINED)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(part.to_owned(), style));
-    }
-    Line::from(spans)
-}
-
-fn looks_like_tree_line(raw: &str) -> bool {
-    raw.contains("├")
-        || raw.contains("└")
-        || raw.contains("│")
-        || raw.contains("──")
-        || raw.contains(" (*)")
-}
-
-fn tree_output_line(raw: &str) -> Line<'static> {
-    let split_at = raw
-        .char_indices()
-        .find(|(_, ch)| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    let (tree_prefix, rest) = raw.split_at(split_at);
-    let mut spans = vec![Span::styled(
-        tree_prefix.to_owned(),
-        Style::default().fg(Color::DarkGray),
-    )];
-    for part in rest.split_inclusive(' ') {
-        let style =
-            if part.starts_with('v') || part.contains("(*)") || part.contains("(proc-macro)") {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-        spans.push(Span::styled(part.to_owned(), style));
-    }
-    Line::from(spans)
-}
-
 fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x
         && column < area.x.saturating_add(area.width)
         && row >= area.y
         && row < area.y.saturating_add(area.height)
-}
-
-fn panel_block(title: impl Into<String>, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-
-    Block::default()
-        .title(Span::styled(title.into(), style))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(style)
 }

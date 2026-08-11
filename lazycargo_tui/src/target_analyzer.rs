@@ -83,7 +83,7 @@ impl DiskSnapshot {
     }
 }
 
-pub fn analyze_target(root: &Path, local_crates: &[String]) -> DiskSnapshot {
+pub fn analyze_target(root: &Path, local_crates: &[String], stale_days: u64) -> DiskSnapshot {
     let target = root.join("target");
     let local = local_crates
         .iter()
@@ -94,7 +94,7 @@ pub fn analyze_target(root: &Path, local_crates: &[String]) -> DiskSnapshot {
     let mut profiles = BTreeMap::<String, ProfileAccumulator>::new();
     let mut crates = BTreeMap::<(String, String), u64>::new();
     let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(7 * 24 * 60 * 60))
+        .checked_sub(Duration::from_secs(stale_days.max(1) * 24 * 60 * 60))
         .unwrap_or(SystemTime::UNIX_EPOCH);
 
     if !target.exists() {
@@ -174,16 +174,32 @@ pub fn analyze_target(root: &Path, local_crates: &[String]) -> DiskSnapshot {
     }
 }
 
-pub fn clean_stale(root: &Path, dry_run: bool) -> Result<Vec<String>, String> {
+pub struct CleanStaleReport {
+    pub lines: Vec<String>,
+    pub artifact_count: usize,
+    pub total_size: u64,
+}
+
+pub fn clean_stale(
+    root: &Path,
+    dry_run: bool,
+    stale_days: u64,
+) -> Result<CleanStaleReport, String> {
     let target = root.join("target");
     if !target.exists() {
-        return Ok(vec!["target directory does not exist".to_owned()]);
+        return Ok(CleanStaleReport {
+            lines: vec!["target directory does not exist".to_owned()],
+            artifact_count: 0,
+            total_size: 0,
+        });
     }
 
     let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(7 * 24 * 60 * 60))
+        .checked_sub(Duration::from_secs(stale_days.max(1) * 24 * 60 * 60))
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut cleaned = Vec::new();
+    let mut artifact_count = 0;
+    let mut total_size = 0;
 
     for entry in WalkDir::new(&target).into_iter() {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -199,6 +215,8 @@ pub fn clean_stale(root: &Path, dry_run: bool) -> Result<Vec<String>, String> {
         if modified >= cutoff {
             continue;
         }
+        artifact_count += 1;
+        total_size += metadata.len();
         cleaned.push(format!(
             "{} {}",
             format_bytes(metadata.len()),
@@ -210,9 +228,16 @@ pub fn clean_stale(root: &Path, dry_run: bool) -> Result<Vec<String>, String> {
     }
 
     if cleaned.is_empty() {
-        cleaned.push("no stale .rmeta/.rlib artifacts older than 7 days".to_owned());
+        cleaned.push(format!(
+            "no stale .rmeta/.rlib artifacts older than {} days",
+            stale_days.max(1)
+        ));
     }
-    Ok(cleaned)
+    Ok(CleanStaleReport {
+        artifact_count,
+        lines: cleaned,
+        total_size,
+    })
 }
 
 struct ProfileAccumulator {
@@ -274,4 +299,46 @@ fn is_cleanable_artifact(path: &Path) -> bool {
 
 fn normalize_crate_name(name: &str) -> String {
     name.replace('-', "_").to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "lazycargo-target-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn analyze_missing_target_returns_empty_snapshot() {
+        let root = temp_root("missing");
+
+        let snapshot = analyze_target(&root, &["app".to_owned()], 7);
+
+        assert_eq!(snapshot.total_size, 0);
+        assert_eq!(snapshot.stale_size, 0);
+        assert!(snapshot.by_crate.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_missing_target_reports_no_artifacts() {
+        let root = temp_root("clean-missing");
+
+        let report = clean_stale(&root, false, 7).unwrap();
+
+        assert_eq!(report.artifact_count, 0);
+        assert_eq!(report.total_size, 0);
+        assert_eq!(report.lines, ["target directory does not exist"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

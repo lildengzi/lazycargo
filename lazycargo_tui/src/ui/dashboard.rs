@@ -6,6 +6,7 @@ use crate::build_history::format_duration_ms;
 use crate::dep_tree;
 
 use crate::state::OutputSlot;
+use crate::util::{format_bytes, progress_bar};
 
 use super::{App, BuildCoreTab, DependenciesTab, FocusPanel, HistoryEntry, WorkspaceTab};
 
@@ -135,11 +136,6 @@ pub(super) fn build_items() -> Vec<CommandItem> {
             detail: "cargo clean".to_owned(),
         },
         CommandItem {
-            key: "new",
-            label: "new project".to_owned(),
-            detail: "cargo new <name>".to_owned(),
-        },
-        CommandItem {
             key: "timings",
             label: "build --timings".to_owned(),
             detail: "cargo build --timings".to_owned(),
@@ -183,9 +179,7 @@ fn workspace_detail_lines(app: &App) -> Vec<String> {
         .unwrap_or(app.workspace.project.manifest_path.as_str());
 
     let mut lines = vec![
-        "Workspace scope".to_owned(),
-        String::new(),
-        app.selected_scope_label(),
+        format!("scope: {}", app.selected_scope_label()),
         String::new(),
         "Health snapshot".to_owned(),
         format!("  rustc: {}", app.workspace.project.rustc_version),
@@ -237,8 +231,6 @@ fn workspace_detail_lines(app: &App) -> Vec<String> {
 
 fn build_detail_lines(app: &App) -> Vec<String> {
     vec![
-        "Build".to_owned(),
-        String::new(),
         selected_item_detail(&build_items(), app.selection.build_selected),
         format!("scope: {}", app.selected_scope_label()),
         String::new(),
@@ -252,8 +244,6 @@ fn build_detail_lines(app: &App) -> Vec<String> {
 fn dependency_detail_lines(app: &App) -> Vec<String> {
     let dependency = selected_dependency(app);
     let mut lines = vec![
-        "Dependencies".to_owned(),
-        String::new(),
         selected_dependency_detail(app, dependency),
         format!("scope: {}", app.selected_scope_label()),
         String::new(),
@@ -277,8 +267,6 @@ fn dependency_detail_lines(app: &App) -> Vec<String> {
 
 fn workspace_metrics_lines(app: &App) -> Vec<String> {
     let mut lines = vec![
-        "Workspace metrics".to_owned(),
-        String::new(),
         format!("last status: {}", app.navigation.last_status),
         format!("scope: {}", app.selected_scope_label()),
         format!("targets: {}", app.workspace.project.targets.len()),
@@ -364,12 +352,20 @@ fn workspace_metrics_lines(app: &App) -> Vec<String> {
 }
 
 fn target_analysis_lines(app: &App) -> Vec<String> {
+    let selected = app
+        .selection
+        .target_crate_selected
+        .min(app.workspace.disk.by_crate.len().saturating_sub(1));
     let mut lines = vec![
-        "Target Analysis".to_owned(),
-        String::new(),
         format!(
-            "Total: {}  |  Stale: {} (7d+)",
-            app.workspace.disk.total_label, app.workspace.disk.stale_label
+            "Total: {}  |  Stale: {} ({}d+)",
+            app.workspace.disk.total_label,
+            app.workspace.disk.stale_label,
+            app.config.target_stale_days
+        ),
+        format!(
+            "Disk pressure: {}",
+            disk_pressure_bar(app.workspace.disk.total_size)
         ),
         format!(
             "Last updated: {:.1}s ago",
@@ -391,26 +387,73 @@ fn target_analysis_lines(app: &App) -> Vec<String> {
             )
         }));
     }
-    lines.extend([String::new(), "Top 20 Crates".to_owned()]);
+    lines.extend([
+        String::new(),
+        format!("Top {} Crates", app.config.target_top_crates),
+    ]);
     if app.workspace.disk.by_crate.is_empty() {
         lines.push("  <no attributable crate artifacts>".to_owned());
     } else {
-        lines.extend(app.workspace.disk.by_crate.iter().take(20).map(|item| {
-            let local = if item.is_local { "local" } else { "dep" };
+        lines.extend(
+            app.workspace
+                .disk
+                .by_crate
+                .iter()
+                .take(app.config.target_top_crates)
+                .enumerate()
+                .map(|(index, item)| {
+                    let local = if item.is_local { "local" } else { "dep" };
+                    let marker = if index == selected { ">" } else { " " };
+                    format!(
+                        "{marker} {:<24} {:>10} {:<8} {}",
+                        item.name, item.label, item.profile, local
+                    )
+                }),
+        );
+    }
+    lines.extend([String::new(), "Selected crate".to_owned()]);
+    if let Some(item) = app.workspace.disk.by_crate.get(selected) {
+        lines.extend([
+            format!("  name: {}", item.name),
+            format!("  size: {}", item.label),
+            format!("  profile: {}", item.profile),
             format!(
-                "  {:<24} {:>10} {:<8} {}",
-                item.name, item.label, item.profile, local
-            )
-        }));
+                "  ownership: {}",
+                if item.is_local {
+                    "workspace crate"
+                } else {
+                    "dependency"
+                }
+            ),
+            "  enter: inspect selected crate".to_owned(),
+            "  future: precise single-crate artifact clean".to_owned(),
+        ]);
+    } else {
+        lines.push("  <no crate selected>".to_owned());
     }
     lines.extend([
         String::new(),
         "Actions".to_owned(),
         "  r: refresh target analysis".to_owned(),
         "  d: dry-run stale clean".to_owned(),
-        "  c: clean stale .rmeta/.rlib files older than 7 days".to_owned(),
+        format!(
+            "  c: clean stale .rmeta/.rlib files older than {} days",
+            app.config.target_stale_days
+        ),
     ]);
     lines
+}
+
+fn disk_pressure_bar(size: u64) -> String {
+    const SOFT_LIMIT: u64 = 20 * 1024 * 1024 * 1024;
+    const WIDTH: usize = 20;
+    let limit = SOFT_LIMIT.max(size);
+    format!(
+        "{} {} / {}",
+        progress_bar(size as f64 / limit as f64, WIDTH),
+        format_bytes(size),
+        format_bytes(SOFT_LIMIT)
+    )
 }
 
 fn dependency_tree_lines(app: &App) -> Vec<String> {
@@ -421,7 +464,7 @@ fn dependency_tree_lines(app: &App) -> Vec<String> {
         .unwrap_or(&[]);
     let visible = dep_tree::flatten_visible(tree_nodes);
     let selected = visible.get(app.selection.tree_selected);
-    let mut lines = vec!["Dependency Tree".to_owned(), String::new()];
+    let mut lines = Vec::new();
     lines.extend(dep_tree::render_tree_lines(
         tree_nodes,
         app.selection.tree_selected,

@@ -18,6 +18,7 @@ cargo build --workspace --release
 - In limited mode, run `new project` from Build Core.
 - Start in a single-crate project.
 - Start in a multi-crate workspace.
+- Run `lazycargo config` and confirm it prints the config path and JSON values.
 
 ## Navigation
 
@@ -49,11 +50,13 @@ cargo build --workspace --release
 - Refresh with `r`.
 - Run dry-run stale cleanup with `d`.
 - Run stale cleanup with `c` only in a disposable project.
+- Change `target_stale_days` and `target_top_crates` in the config and confirm labels/list length follow it.
 - Confirm target size updates after refresh.
 
 ## Search
 
 - Search for a known crate such as `serde`.
+- Change `search_limit` and `network_timeout_secs` and confirm the search command/detail reflect them.
 - Search with network unavailable or proxy misconfigured and confirm fallback/error messaging is understandable.
 - Inspect a result with `Enter`.
 - Open crates.io/docs/repository links with `o`, `d`, and `g`.

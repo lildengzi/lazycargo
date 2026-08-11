@@ -6,6 +6,7 @@ pub enum CliAction {
     Run(CargoTask),
     SearchCrates(CrateSearchQuery),
     AddDependency(DependencyAddPlan),
+    PrintConfig,
     PrintHelp,
 }
 
@@ -46,6 +47,10 @@ where
 
     if matches!(command.as_str(), "-h" | "--help" | "help") {
         return Ok(CliAction::PrintHelp);
+    }
+
+    if command == "config" {
+        return Ok(CliAction::PrintConfig);
     }
 
     if command == "search" || command == "s" {
@@ -280,5 +285,5 @@ fn normalize_features(features: &mut FeatureSelection) -> Result<(), ArgsError> 
 }
 
 pub fn help_text() -> &'static str {
-    "lazycargo <command> [options]\n\nCommands:\n  check|c\n  build|b\n  run|r\n  test|t\n  clippy|l\n  doc|d\n  update|u\n  search|s <query>\n  add|a <crate>\n\nCommon task options:\n  -p, --package <name>\n      --workspace\n      --release\n      --target <triple>\n  -F, --features <a,b>\n      --all-features\n      --no-default-features\n\nCommand options:\n      --bin <name>         run only\n      --nocapture          test only\n      --limit <n>          search only\n      --dev                add only\n      --build              add only\n      --optional           add only\n"
+    "lazycargo <command> [options]\n\nCommands:\n  check|c\n  build|b\n  run|r\n  test|t\n  clippy|l\n  doc|d\n  update|u\n  search|s <query>\n  add|a <crate>\n  config\n\nCommon task options:\n  -p, --package <name>\n      --workspace\n      --release\n      --target <triple>\n  -F, --features <a,b>\n      --all-features\n      --no-default-features\n\nCommand options:\n      --bin <name>         run only\n      --nocapture          test only\n      --limit <n>          search only\n      --dev                add only\n      --build              add only\n      --optional           add only\n\nNon-TUI commands preview the Cargo command instead of executing it.\n"
 }

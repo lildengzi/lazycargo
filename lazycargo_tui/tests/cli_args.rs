@@ -139,3 +139,10 @@ fn rejects_conflicting_dependency_kinds() {
 
     assert_eq!(error.message(), "--dev and --build cannot be combined");
 }
+
+#[test]
+fn recognizes_config_command() {
+    let action = parse_args(["config"]).unwrap();
+
+    assert_eq!(action, CliAction::PrintConfig);
+}
