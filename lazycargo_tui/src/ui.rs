@@ -23,7 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::build_history::{is_recordable_command, BuildEntry, BuildHistory, CrateTiming};
+use crate::build_history::{is_recordable_command, BuildEntry, CrateTiming};
 use crate::cargo_task::{
     CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
 };
@@ -31,17 +31,15 @@ use crate::config::AppConfig;
 use crate::core::process::{extract_diagnostics, spawn_streaming};
 use crate::core::task::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
-    SearchJobKind, SearchJobResult,
+    SearchJobKind,
 };
 use crate::dep_tree;
 use crate::keymap::{
     self, NormalKeyAction, NormalKeyContext, ProjectNewConfirmAction, TextInputAction,
 };
 use crate::metadata::ProjectInfo;
-use crate::state::{
-    ContextOutput, NavigationState, OutputSlot, ProcessState, SearchModel, SelectionState,
-    WorkspaceModel,
-};
+use crate::core::model::{ContextOutput, CoreState, OutputSlot};
+use crate::state::{NavigationState, SelectionState};
 use crate::target_analyzer::{self, DiskSnapshot};
 use crate::util::format_bytes;
 use lazycargo_search::{SearchLinkTarget, SearchState};
@@ -185,15 +183,9 @@ struct MouseState {
 }
 
 struct App {
-    config: AppConfig,
-    workspace: WorkspaceModel,
+    core: CoreState,
     navigation: NavigationState,
     selection: SelectionState,
-    process: ProcessState,
-    output_store: HashMap<OutputSlot, ContextOutput>,
-    search: SearchModel,
-    search_receiver: Option<Receiver<SearchJobResult>>,
-    search_started: Option<Instant>,
     history: Vec<HistoryEntry>,
 }
 
@@ -206,36 +198,30 @@ impl App {
             config.target_stale_days,
         ));
         let output = project_health_snapshot(&project, &disk);
-        let mut output_store = HashMap::new();
-        output_store.insert(OutputSlot::BuildLive, ContextOutput::with_lines(output));
-        output_store.insert(
+        let mut core = CoreState::new(project.clone(), config, disk);
+        core.disk_receiver = disk_receiver;
+        core.output.insert(OutputSlot::BuildLive, ContextOutput::with_lines(output));
+        core.output.insert(
             OutputSlot::BuildConfig,
             ContextOutput::with_lines(vec!["no build/check run yet".to_owned()]),
         );
-        output_store.insert(
+        core.output.insert(
             OutputSlot::DepsFeatures,
             ContextOutput::with_lines(vec![
                 "select dependency, then press t/i for offline tree or T/I to allow fetch"
                     .to_owned(),
             ]),
         );
-        output_store.insert(
+        core.output.insert(
             OutputSlot::DepsTree,
             ContextOutput::with_lines(vec!["no dependency tree yet".to_owned()]),
         );
-        output_store.insert(
+        core.output.insert(
             OutputSlot::SearchDetail,
             ContextOutput::with_lines(vec!["no package action yet".to_owned()]),
         );
         Self {
-            config,
-            workspace: WorkspaceModel {
-                project,
-                disk,
-                disk_receiver,
-                build_history: BuildHistory::load(),
-                diagnostics: Vec::new(),
-            },
+            core,
             navigation: NavigationState {
                 focus: Focus::Workspace,
                 current_focus: FocusPanel::Workspace,
@@ -260,25 +246,13 @@ impl App {
                 tree_selected: 0,
                 tree_expanded: HashMap::new(),
             },
-            process: ProcessState {
-                child: None,
-                command: String::new(),
-                start: Instant::now(),
-                slot: OutputSlot::BuildLive,
-            },
-            output_store,
-            search: SearchModel {
-                state: SearchState::default(),
-            },
-            search_receiver: None,
-            search_started: None,
             history: Vec::new(),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if keymap::is_ctrl_c(key) {
-            if self.process.child.is_some() {
+            if self.core.processes.child.is_some() {
                 self.kill_running_child();
                 return true;
             }
@@ -298,60 +272,60 @@ impl App {
     }
 
     fn poll_disk_snapshot(&mut self) {
-        let Some(receiver) = &self.workspace.disk_receiver else {
+        let Some(receiver) = &self.core.disk_receiver else {
             return;
         };
         let Ok(snapshot) = receiver.try_recv() else {
             return;
         };
-        self.workspace.disk = snapshot;
+        self.core.disk = snapshot;
         self.selection.target_crate_selected = self
             .selection
             .target_crate_selected
-            .min(self.workspace.disk.by_crate.len().saturating_sub(1));
-        self.workspace.disk_receiver = None;
+            .min(self.core.disk.by_crate.len().saturating_sub(1));
+        self.core.disk_receiver = None;
         if self.navigation.last_status == "ready" {
             self.navigation.last_status = "disk snapshot ready".to_owned();
         }
     }
 
     fn poll_search_job(&mut self) {
-        if self.search_receiver.is_some() {
-            let elapsed = self
+        if self.core.search_receiver.is_some() {
+            let elapsed = self.core
                 .search_started
                 .map(|started| started.elapsed())
                 .unwrap_or_default();
             if let Some(name) = self.search_info_pending_name() {
-                self.search
+                self.core.search
                     .state
                     .set_selected_detail(name.clone(), info_progress_detail(&name, elapsed));
             } else {
-                self.search
+                self.core.search
                     .state
-                    .set_empty_detail(search_progress_detail(&self.search.state.query, elapsed));
+                    .set_empty_detail(search_progress_detail(&self.core.search.state.query, elapsed));
             }
         }
-        let Some(receiver) = &self.search_receiver else {
+        let Some(receiver) = &self.core.search_receiver else {
             return;
         };
         let Ok(result) = receiver.try_recv() else {
             return;
         };
-        self.search_receiver = None;
-        self.search_started = None;
+        self.core.search_receiver = None;
+        self.core.search_started = None;
         match result.kind {
             SearchJobKind::Search => {
                 if let Some(results) = result.results {
-                    self.search.state.set_results(results);
+                    self.core.search.state.set_results(results);
                 } else {
-                    self.search.state.set_empty_detail(result.detail.clone());
+                    self.core.search.state.set_empty_detail(result.detail.clone());
                 }
             }
             SearchJobKind::Info { name, author } => {
                 if let Some(author) = author {
-                    self.search.state.set_selected_author(author);
+                    self.core.search.state.set_selected_author(author);
                 }
-                self.search
+                self.core.search
                     .state
                     .set_info_detail(name, result.detail.clone());
                 self.record_crate_inspection(
@@ -361,7 +335,7 @@ impl App {
                 );
             }
         }
-        self.set_slot_lines(OutputSlot::SearchDetail, result.detail);
+        self.core.set_slot_lines(OutputSlot::SearchDetail, result.detail);
         self.navigation.last_status = result.status;
         self.navigation.message = result.message;
         self.history.insert(
@@ -372,7 +346,7 @@ impl App {
                 duration: result.duration,
             },
         );
-        self.history.truncate(self.config.command_history_limit);
+        self.history.truncate(self.core.config.command_history_limit);
     }
 
     fn search_info_pending_name(&self) -> Option<String> {
@@ -384,17 +358,17 @@ impl App {
     }
 
     fn refresh_disk_snapshot(&mut self) {
-        self.workspace.disk_receiver = Some(load_disk_snapshot_async(
-            self.workspace.project.clone(),
-            self.config.target_stale_days,
+        self.core.disk_receiver = Some(load_disk_snapshot_async(
+            self.core.project.clone(),
+            self.core.config.target_stale_days,
         ));
         self.navigation.message = "refreshing target analysis".to_owned();
         self.navigation.last_status = "target refresh".to_owned();
     }
 
     fn clean_target_stale(&mut self, dry_run: bool) {
-        let root = Path::new(&self.workspace.project.workspace_root);
-        match target_analyzer::clean_stale(root, dry_run, self.config.target_stale_days) {
+        let root = Path::new(&self.core.project.workspace_root);
+        match target_analyzer::clean_stale(root, dry_run, self.core.config.target_stale_days) {
             Ok(report) => {
                 let output = std::iter::once(if dry_run {
                     "Target clean dry-run".to_owned()
@@ -403,14 +377,14 @@ impl App {
                 })
                 .chain(std::iter::once(format!(
                     "threshold: {} days, artifacts: {}, total: {}",
-                    self.config.target_stale_days,
+                    self.core.config.target_stale_days,
                     report.artifact_count,
                     format_bytes(report.total_size)
                 )))
                 .chain(std::iter::once(String::new()))
                 .chain(report.lines.clone())
                 .collect();
-                self.set_slot_lines(OutputSlot::WorkspaceTarget, output);
+                self.core.set_slot_lines(OutputSlot::WorkspaceTarget, output);
                 self.navigation.ws_tab = WorkspaceTab::Target;
                 self.navigation.current_focus = FocusPanel::Workspace;
                 self.set_focus(Focus::Output);
@@ -493,7 +467,7 @@ impl App {
             .find(|(_, area, _)| contains(*area, mouse.column, mouse.row))
             .copied()
         {
-            if self.search.state.expanded
+            if self.core.search.state.expanded
                 && focus == Focus::Search
                 && area.height <= 3
                 && mouse.row < area.y.saturating_add(area.height)
@@ -574,7 +548,7 @@ impl App {
     }
 
     fn active_output_slot(&self) -> OutputSlot {
-        if self.search.state.expanded
+        if self.core.search.state.expanded
             && matches!(self.navigation.focus, Focus::Search | Focus::Output)
         {
             return OutputSlot::SearchDetail;
@@ -596,34 +570,8 @@ impl App {
         }
     }
 
-    fn output_for(&mut self, slot: OutputSlot) -> &mut ContextOutput {
-        self.output_store
-            .entry(slot)
-            .or_insert_with(ContextOutput::new)
-    }
-
-    fn output_lines_for(&self, slot: OutputSlot) -> Vec<String> {
-        self.output_store
-            .get(&slot)
-            .map(|ctx| ctx.lines.clone())
-            .unwrap_or_default()
-    }
-
-    fn set_slot_lines(&mut self, slot: OutputSlot, lines: Vec<String>) {
-        let max_lines = self.config.output_max_lines;
-        let ctx = self.output_for(slot);
-        ctx.lines = lines;
-        ctx.trim_lines(max_lines);
-        ctx.stream_rx = None;
-        ctx.scroll = 0;
-        ctx.follow_tail = false;
-        if slot != OutputSlot::DepsTree {
-            ctx.tree_nodes.clear();
-        }
-    }
-
     fn reset_slot_scroll(&mut self, slot: OutputSlot) {
-        self.output_for(slot).scroll = 0;
+        self.core.context(slot).scroll = 0;
     }
 
     fn apply_context_tab(&mut self, tab: ContextTab) {
@@ -660,7 +608,7 @@ impl App {
             self.navigation.search_return_focus = self.navigation.focus;
         }
         self.set_focus(Focus::Search);
-        self.search.state.expanded = true;
+        self.core.search.state.expanded = true;
         self.reset_slot_scroll(OutputSlot::SearchDetail);
         self.navigation.input_mode = InputMode::CrateSearch;
     }
@@ -670,7 +618,7 @@ impl App {
         let slot = self.active_output_slot();
         let content_len = output_lines(self).len();
         let scroll = {
-            let ctx = self.output_for(slot);
+            let ctx = self.core.context(slot);
             let visible_rows = ctx.visible_rows.max(1);
             let max_scroll = content_len.saturating_sub(visible_rows);
             let current = if ctx.follow_tail {
@@ -711,7 +659,7 @@ impl App {
         let relative = row.saturating_sub(area.y) as usize;
         let track = area.height.saturating_sub(1).max(1) as usize;
         let scroll = (relative * max_scroll / track).min(max_scroll);
-        let ctx = self.output_for(self.active_output_slot());
+        let ctx = self.core.context(self.active_output_slot());
         ctx.scroll = scroll;
         ctx.follow_tail = scroll >= max_scroll;
         self.set_focus(Focus::Output);
@@ -754,14 +702,14 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         let context = NormalKeyContext {
-            search_expanded: self.search.state.expanded,
+            search_expanded: self.core.search.state.expanded,
             focus: self.navigation.focus,
             ws_tab: self.navigation.ws_tab,
             deps_tab: self.navigation.deps_tab,
         };
         match keymap::normal_key_action(key, context) {
             NormalKeyAction::BackFromSearch => {
-                self.search.state.expanded = false;
+                self.core.search.state.expanded = false;
                 self.set_focus(self.navigation.search_return_focus);
                 self.navigation.message = "back from search".to_owned();
             }
@@ -876,7 +824,7 @@ impl App {
                 self.navigation.message = "search input blurred".to_owned();
             }
             TextInputAction::Submit => {
-                let query = self.search.state.query.trim().to_owned();
+                let query = self.core.search.state.query.trim().to_owned();
                 self.navigation.input_mode = InputMode::Normal;
                 if query.is_empty() {
                     self.navigation.message = "empty crate search".to_owned();
@@ -885,9 +833,9 @@ impl App {
                 }
             }
             TextInputAction::Backspace => {
-                self.search.state.query.pop();
+                self.core.search.state.query.pop();
             }
-            TextInputAction::Push(value) => self.search.state.query.push(value),
+            TextInputAction::Push(value) => self.core.search.state.query.push(value),
             TextInputAction::Noop => {}
         }
 
@@ -918,12 +866,12 @@ impl App {
 
     fn move_selection(&mut self, delta: isize) {
         let len = match self.navigation.focus {
-            Focus::Workspace => workspace_items(&self.workspace.project).len(),
+            Focus::Workspace => workspace_items(&self.core.project).len(),
             Focus::Dependencies => {
-                dependency_items_for(&self.workspace.project, self.selection.workspace_selected)
+                dependency_items_for(&self.core.project, self.selection.workspace_selected)
                     .len()
             }
-            Focus::Search => self.search.state.result_items().len(),
+            Focus::Search => self.core.search.state.result_items().len(),
             Focus::Build => build_items().len(),
             _ => 0,
         };
@@ -948,12 +896,12 @@ impl App {
 
     fn select_row(&mut self, focus: Focus, row: usize) {
         let len = match focus {
-            Focus::Workspace => workspace_items(&self.workspace.project).len(),
+            Focus::Workspace => workspace_items(&self.core.project).len(),
             Focus::Dependencies => {
-                dependency_items_for(&self.workspace.project, self.selection.workspace_selected)
+                dependency_items_for(&self.core.project, self.selection.workspace_selected)
                     .len()
             }
-            Focus::Search => self.search.state.result_items().len(),
+            Focus::Search => self.core.search.state.result_items().len(),
             Focus::Build => build_items().len(),
             _ => 0,
         };
@@ -974,14 +922,14 @@ impl App {
         self.selection.dependency_selected = 0;
         self.reset_slot_scroll(self.active_output_slot());
         self.navigation.deps_tab = DependenciesTab::Features;
-        self.set_slot_lines(
+        self.core.set_slot_lines(
             OutputSlot::DepsFeatures,
             vec![format!(
                 "workspace scope changed: {}",
                 self.selected_scope_label()
             )],
         );
-        self.set_slot_lines(
+        self.core.set_slot_lines(
             OutputSlot::DepsTree,
             vec!["dependency tree not loaded for current scope".to_owned()],
         );
@@ -991,7 +939,7 @@ impl App {
         if self.selection.workspace_selected == 0 {
             "workspace".to_owned()
         } else {
-            self.workspace
+            self.core
                 .project
                 .packages
                 .get(self.selection.workspace_selected.saturating_sub(1))
@@ -1004,19 +952,18 @@ impl App {
         match focus {
             Focus::Workspace => &mut self.selection.workspace_selected,
             Focus::Dependencies => &mut self.selection.dependency_selected,
-            Focus::Search => &mut self.search.state.selected,
+            Focus::Search => &mut self.core.search.state.selected,
             Focus::Build => &mut self.selection.build_selected,
             _ => &mut self.selection.workspace_selected,
         }
     }
 
     fn move_target_crate_selection(&mut self, delta: isize) {
-        let len = self
-            .workspace
+        let len = self.core
             .disk
             .by_crate
             .len()
-            .min(self.config.target_top_crates);
+            .min(self.core.config.target_top_crates);
         if len == 0 {
             self.scroll_right(delta);
             return;
@@ -1029,8 +976,7 @@ impl App {
     }
 
     fn inspect_target_crate(&mut self) {
-        let Some(item) = self
-            .workspace
+        let Some(item) = self.core
             .disk
             .by_crate
             .get(self.selection.target_crate_selected)
@@ -1046,7 +992,7 @@ impl App {
         match self.navigation.focus {
             Focus::Workspace => {
                 if let Some(scope) =
-                    workspace_items(&self.workspace.project).get(self.selection.workspace_selected)
+                    workspace_items(&self.core.project).get(self.selection.workspace_selected)
                 {
                     self.preview(&format!("scope: {scope}"));
                 }
@@ -1063,9 +1009,9 @@ impl App {
             }
             Focus::Search => {
                 if self.navigation.input_mode == InputMode::CrateSearch
-                    || self.search.state.results.is_empty()
+                    || self.core.search.state.results.is_empty()
                 {
-                    self.search.state.expanded = true;
+                    self.core.search.state.expanded = true;
                     self.navigation.input_mode = InputMode::CrateSearch;
                     self.navigation.message = "search crates".to_owned();
                 } else {
@@ -1094,8 +1040,8 @@ impl App {
     }
 
     fn run_cargo(&mut self, detail_focus: Focus, args: &[&str]) {
-        if self.process.child.is_some() {
-            self.navigation.message = format!("already running: {}", self.process.command);
+        if self.core.processes.child.is_some() {
+            self.navigation.message = format!("already running: {}", self.core.processes.command);
             return;
         }
 
@@ -1117,7 +1063,7 @@ impl App {
         }
 
         {
-            let ctx = self.output_for(slot);
+            let ctx = self.core.context(slot);
             ctx.lines.clear();
             ctx.lines.push(format!("$ {command}"));
             ctx.scroll = usize::MAX;
@@ -1128,50 +1074,48 @@ impl App {
 
         match spawn_streaming(&spec.program, &spec.args, &[("CARGO_TERM_COLOR", "always")]) {
             Ok((child, rx)) => {
-                self.process.child = Some(child);
-                self.process.command = command;
-                self.process.start = Instant::now();
-                self.process.slot = slot;
-                self.output_for(slot).stream_rx = Some(rx);
+                self.core.processes.child = Some(child);
+                self.core.processes.command = command;
+                self.core.processes.start = Instant::now();
+                self.core.processes.slot = slot;
+                self.core.context(slot).stream_rx = Some(rx);
             }
             Err(error) => {
                 self.navigation.last_status = "error".to_owned();
-                self.set_slot_lines(slot, vec![format!("failed to run {command}: {error}")]);
-                self.workspace.diagnostics = vec![format!("runner error: {error}")];
+                self.core.set_slot_lines(slot, vec![format!("failed to run {command}: {error}")]);
+                self.core.diagnostics = vec![format!("runner error: {error}")];
                 self.navigation.message = format!("failed: {command}");
             }
         }
     }
 
     fn drain_all_streams(&mut self) {
-        let max_lines = self.config.output_max_lines;
-        for ctx in self.output_store.values_mut() {
-            ctx.drain_stream(max_lines);
-        }
+        let max_lines = self.core.config.output_max_lines;
+        self.core.drain_all_streams(max_lines);
 
-        let Some(child) = &mut self.process.child else {
+        let Some(child) = &mut self.core.processes.child else {
             return;
         };
 
         match child.try_wait() {
             Ok(Some(status)) => {
-                let Some(child) = self.process.child.take() else {
+                let Some(child) = self.core.processes.child.take() else {
                     return;
                 };
                 drop(child);
-                let command = std::mem::take(&mut self.process.command);
-                let duration = self.process.start.elapsed();
-                let slot = self.process.slot;
-                self.output_for(slot).drain_stream(max_lines);
-                self.output_for(slot).stream_rx = None;
+                let command = std::mem::take(&mut self.core.processes.command);
+                let duration = self.core.processes.start.elapsed();
+                let slot = self.core.processes.slot;
+                self.core.context(slot).drain_stream(max_lines);
+                self.core.context(slot).stream_rx = None;
                 self.finish_cargo_output(slot, command, duration, status);
             }
             Ok(None) => {}
             Err(error) => {
                 self.navigation.message = format!("wait failed: {error}");
                 self.navigation.last_status = "wait failed".to_owned();
-                self.process.child = None;
-                self.process.command.clear();
+                self.core.processes.child = None;
+                self.core.processes.command.clear();
             }
         }
     }
@@ -1190,7 +1134,7 @@ impl App {
             format!("failed {:.2}s", duration.as_secs_f32())
         };
         let lines = {
-            let ctx = self.output_for(slot);
+            let ctx = self.core.context(slot);
             ctx.lines.push(String::new());
             ctx.lines.push(format!("exit: {status}"));
             ctx.lines
@@ -1198,7 +1142,7 @@ impl App {
             ctx.lines.clone()
         };
         if slot == OutputSlot::BuildLive {
-            self.workspace.diagnostics = extract_diagnostics(&lines);
+            self.core.diagnostics = extract_diagnostics(&lines);
         }
         self.history.insert(
             0,
@@ -1208,7 +1152,7 @@ impl App {
                 duration,
             },
         );
-        self.history.truncate(self.config.command_history_limit);
+        self.history.truncate(self.core.config.command_history_limit);
         self.record_build_history(&command, duration, success);
         if success && is_project_init_command(&command) {
             self.reload_project_after_init();
@@ -1230,25 +1174,24 @@ impl App {
             duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
             success,
             target_triple: std::env::consts::ARCH.to_owned(),
-            rustc_version: self.workspace.project.rustc_version.clone(),
-            crate_timings: latest_crate_timings(Path::new(&self.workspace.project.workspace_root)),
+            rustc_version: self.core.project.rustc_version.clone(),
+            crate_timings: latest_crate_timings(Path::new(&self.core.project.workspace_root)),
         };
-        if let Err(error) = self
-            .workspace
-            .build_history
-            .add_entry(entry, self.config.build_history_limit)
+        if let Err(error) = self.core
+            .history
+            .add_entry(entry, self.core.config.build_history_limit)
         {
-            self.workspace
+            self.core
                 .diagnostics
                 .push(format!("failed to save build history: {error}"));
         }
     }
 
     fn update_dependency_tree_from_output(&mut self) {
-        let lines = self.output_lines_for(OutputSlot::DepsTree);
+        let lines = self.core.slot_lines(OutputSlot::DepsTree);
         let nodes = dep_tree::parse_tree_output(&lines, &self.selection.tree_expanded);
         if nodes.is_empty() {
-            self.output_for(OutputSlot::DepsTree).lines.insert(
+            self.core.context(OutputSlot::DepsTree).lines.insert(
                 0,
                 "structured tree parse unavailable; showing raw cargo tree output".to_owned(),
             );
@@ -1260,14 +1203,14 @@ impl App {
             .tree_selected
             .min(visible_len.saturating_sub(1));
         let selected = self.selection.tree_selected;
-        let ctx = self.output_for(OutputSlot::DepsTree);
+        let ctx = self.core.context(OutputSlot::DepsTree);
         ctx.tree_nodes = nodes;
         dep_tree::apply_selected(&mut ctx.tree_nodes, selected);
     }
 
     fn move_tree_selection(&mut self, delta: isize) {
-        let len = self
-            .output_store
+        let len = self.core
+            .output
             .get(&OutputSlot::DepsTree)
             .map(|ctx| dep_tree::flatten_visible(&ctx.tree_nodes).len())
             .unwrap_or(0);
@@ -1280,7 +1223,7 @@ impl App {
             as usize;
         let selected = self.selection.tree_selected;
         dep_tree::apply_selected(
-            &mut self.output_for(OutputSlot::DepsTree).tree_nodes,
+            &mut self.core.context(OutputSlot::DepsTree).tree_nodes,
             selected,
         );
         self.navigation.message = format!("tree node {}", self.selection.tree_selected + 1);
@@ -1289,7 +1232,7 @@ impl App {
     fn toggle_selected_tree_node(&mut self) {
         let selected = self.selection.tree_selected;
         let toggled = {
-            let ctx = self.output_for(OutputSlot::DepsTree);
+            let ctx = self.core.context(OutputSlot::DepsTree);
             dep_tree::toggle_node(&mut ctx.tree_nodes, selected).map(|key| {
                 let expanded = dep_tree::flatten_visible(&ctx.tree_nodes)
                     .get(selected)
@@ -1307,7 +1250,7 @@ impl App {
     fn collapse_selected_tree_node(&mut self) {
         let selected = self.selection.tree_selected;
         let Some(key) = dep_tree::set_node_expanded(
-            &mut self.output_for(OutputSlot::DepsTree).tree_nodes,
+            &mut self.core.context(OutputSlot::DepsTree).tree_nodes,
             selected,
             false,
         ) else {
@@ -1318,7 +1261,7 @@ impl App {
     }
 
     fn kill_running_child(&mut self) {
-        let Some(mut child) = self.process.child.take() else {
+        let Some(mut child) = self.core.processes.child.take() else {
             return;
         };
 
@@ -1326,14 +1269,14 @@ impl App {
         let _ = child.wait();
         self.navigation.message = "killed".to_owned();
         self.navigation.last_status = "killed".to_owned();
-        let slot = self.process.slot;
-        let command = std::mem::take(&mut self.process.command);
-        let max_lines = self.config.output_max_lines;
-        let ctx = self.output_for(slot);
+        let slot = self.core.processes.slot;
+        let command = std::mem::take(&mut self.core.processes.command);
+        let max_lines = self.core.config.output_max_lines;
+        let ctx = self.core.context(slot);
         ctx.drain_stream(max_lines);
         ctx.stream_rx = None;
         ctx.lines.push(format!("killed: {command}"));
-        self.process.command.clear();
+        self.core.processes.command.clear();
     }
 
     fn build_cargo_command(&self, args: &[&str]) -> CommandSpec {
@@ -1430,7 +1373,7 @@ impl App {
         if self.selection.workspace_selected == 0 {
             None
         } else {
-            self.workspace
+            self.core
                 .project
                 .packages
                 .get(self.selection.workspace_selected.saturating_sub(1))
@@ -1441,13 +1384,13 @@ impl App {
     fn reload_project_after_init(&mut self) {
         match ProjectInfo::load() {
             Ok(project) => {
-                self.workspace.project = project;
+                self.core.project = project;
                 self.selection.workspace_selected = 0;
                 self.selection.dependency_selected = 0;
-                self.workspace.disk = DiskSnapshot::pending(&self.workspace.project.packages);
-                self.workspace.disk_receiver = Some(load_disk_snapshot_async(
-                    self.workspace.project.clone(),
-                    self.config.target_stale_days,
+                self.core.disk = DiskSnapshot::pending(&self.core.project.packages);
+                self.core.disk_receiver = Some(load_disk_snapshot_async(
+                    self.core.project.clone(),
+                    self.core.config.target_stale_days,
                 ));
                 self.navigation.message = "Cargo project initialized".to_owned();
                 self.navigation.last_status = "project ready".to_owned();
@@ -1462,7 +1405,7 @@ impl App {
     }
 
     fn search_crates(&mut self, query: &str) {
-        if self.search_receiver.is_some() {
+        if self.core.search_receiver.is_some() {
             self.navigation.message = "search already running".to_owned();
             return;
         }
@@ -1471,17 +1414,17 @@ impl App {
         self.navigation.command_preview = command.clone();
         self.navigation.message = format!("searching crates: {query}");
         self.navigation.focus = Focus::Search;
-        self.search.state.expanded = true;
-        self.search
+        self.core.search.state.expanded = true;
+        self.core.search
             .state
             .set_empty_detail(search_progress_detail(&query, Duration::from_secs(0)));
-        self.set_slot_lines(
+        self.core.set_slot_lines(
             OutputSlot::SearchDetail,
             search_progress_detail(&query, Duration::from_secs(0)),
         );
         let (tx, rx) = mpsc::channel();
-        self.search_receiver = Some(rx);
-        self.search_started = Some(Instant::now());
+        self.core.search_receiver = Some(rx);
+        self.core.search_started = Some(Instant::now());
         let config = self.search_job_config();
         thread::spawn(move || {
             let _ = tx.send(run_search_job(query, config));
@@ -1490,19 +1433,19 @@ impl App {
 
     fn search_job_config(&self) -> SearchJobConfig {
         SearchJobConfig {
-            limit: self.config.search_limit,
-            network_timeout: self.config.network_timeout(),
-            info_timeout: self.config.cargo_info_timeout(),
+            limit: self.core.config.search_limit,
+            network_timeout: self.core.config.network_timeout(),
+            info_timeout: self.core.config.cargo_info_timeout(),
         }
     }
 
     fn inspect_dependency(&mut self) {
         let Some(dependency) = selected_dependency_name(
-            &self.workspace.project,
+            &self.core.project,
             self.selection.workspace_selected,
             self.selection.dependency_selected,
         ) else {
-            self.set_slot_lines(
+            self.core.set_slot_lines(
                 OutputSlot::DepsFeatures,
                 vec!["no dependency selected".to_owned()],
             );
@@ -1510,7 +1453,7 @@ impl App {
         };
 
         self.navigation.command_preview = format!("cargo tree -i {dependency}");
-        self.set_slot_lines(
+        self.core.set_slot_lines(
             OutputSlot::DepsFeatures,
             vec![format!("selected: {dependency}")],
         );
@@ -1532,11 +1475,11 @@ impl App {
 
     fn run_inverse_tree(&mut self, allow_fetch: bool) {
         let Some(dependency) = selected_dependency_name(
-            &self.workspace.project,
+            &self.core.project,
             self.selection.workspace_selected,
             self.selection.dependency_selected,
         ) else {
-            self.set_slot_lines(
+            self.core.set_slot_lines(
                 OutputSlot::DepsFeatures,
                 vec!["select a dependency first".to_owned()],
             );
@@ -1558,13 +1501,13 @@ impl App {
     }
 
     fn preview_add(&mut self) {
-        let selected_name = self
+        let selected_name = self.core
             .search
             .state
             .selected_result()
             .map(|result| result.name.as_str())
             .or_else(|| {
-                let query = self.search.state.query.trim();
+                let query = self.core.search.state.query.trim();
                 (!query.is_empty()).then_some(query)
             })
             .unwrap_or("<crate>");
@@ -1573,23 +1516,23 @@ impl App {
             None => format!("cargo add {selected_name}"),
         };
         self.preview(&command);
-        let detail = self
+        let detail = self.core
             .search
             .state
             .selected_detail()
             .into_iter()
             .chain(vec![String::new(), command])
             .collect();
-        self.set_slot_lines(OutputSlot::SearchDetail, detail);
+        self.core.set_slot_lines(OutputSlot::SearchDetail, detail);
     }
 
     fn inspect_selected_crate(&mut self) {
-        if self.search_receiver.is_some() {
+        if self.core.search_receiver.is_some() {
             self.navigation.message = "search task already running".to_owned();
             return;
         }
-        let Some(result) = self.search.state.selected_result().cloned() else {
-            self.set_slot_lines(
+        let Some(result) = self.core.search.state.selected_result().cloned() else {
+            self.core.set_slot_lines(
                 OutputSlot::SearchDetail,
                 vec!["no crate selected".to_owned()],
             );
@@ -1599,15 +1542,15 @@ impl App {
         let command = format!("cargo info {}", result.name);
         self.navigation.command_preview = command.clone();
         self.navigation.message = format!("inspecting crate: {}", result.name);
-        self.search.state.expanded = true;
+        self.core.search.state.expanded = true;
         let detail = info_progress_detail(&result.name, Duration::from_secs(0));
-        self.search
+        self.core.search
             .state
             .set_selected_detail(result.name.clone(), detail.clone());
-        self.set_slot_lines(OutputSlot::SearchDetail, detail);
+        self.core.set_slot_lines(OutputSlot::SearchDetail, detail);
         let (tx, rx) = mpsc::channel();
-        self.search_receiver = Some(rx);
-        self.search_started = Some(Instant::now());
+        self.core.search_receiver = Some(rx);
+        self.core.search_started = Some(Instant::now());
         let config = self.search_job_config();
         thread::spawn(move || {
             let _ = tx.send(run_info_job(result, config));
@@ -1623,11 +1566,11 @@ impl App {
                 duration,
             },
         );
-        self.history.truncate(self.config.command_history_limit);
+        self.history.truncate(self.core.config.command_history_limit);
     }
 
     fn open_search_link(&mut self, target: SearchLinkTarget) {
-        let url = self.search.state.url_for(target);
+        let url = self.core.search.state.url_for(target);
 
         let Some(url) = url else {
             self.navigation.message = SearchState::unavailable_message(target).to_owned();
@@ -1658,7 +1601,7 @@ impl App {
     }
 
     fn copy_search_detail(&mut self) {
-        let text = self.search.state.selected_detail().join("\n");
+        let text = self.core.search.state.selected_detail().join("\n");
         match copy_to_clipboard(&text) {
             Ok(()) => {
                 self.navigation.message = "copied search detail".to_owned();
@@ -1701,7 +1644,7 @@ pub fn run() -> io::Result<()> {
     if let Some(message) = startup_message {
         app.navigation.last_status = "limited mode".to_owned();
         app.navigation.message = "no Cargo project: initialize here? y/n".to_owned();
-        app.set_slot_lines(
+        app.core.set_slot_lines(
             OutputSlot::BuildLive,
             vec![
                 "Limited mode".to_owned(),
@@ -1800,7 +1743,7 @@ fn render(frame: &mut Frame<'_>, app: &mut App) -> MouseState {
         .split(root[0]);
 
     let mut mouse_state = MouseState::default();
-    if app.search.state.expanded {
+    if app.core.search.state.expanded {
         render_search_page(frame, app, root[0], &mut mouse_state);
     } else {
         render_left(frame, app, main[0], &mut mouse_state);
@@ -1835,7 +1778,7 @@ fn render_left(frame: &mut Frame<'_>, app: &App, area: Rect, mouse_state: &mut M
         app,
         chunks[0],
         Focus::Workspace,
-        workspace_items(&app.workspace.project),
+        workspace_items(&app.core.project),
         app.selection.workspace_selected,
     );
     mouse_state
@@ -1860,7 +1803,7 @@ fn render_left(frame: &mut Frame<'_>, app: &App, area: Rect, mouse_state: &mut M
         app,
         chunks[2],
         Focus::Dependencies,
-        dependency_items_for(&app.workspace.project, app.selection.workspace_selected),
+        dependency_items_for(&app.core.project, app.selection.workspace_selected),
         app.selection.dependency_selected,
     );
     mouse_state
@@ -1892,8 +1835,8 @@ fn render_search_page(
         app,
         left[1],
         Focus::Search,
-        app.search.state.result_items(),
-        app.search.state.selected,
+        app.core.search.state.result_items(),
+        app.core.search.state.selected,
     );
     mouse_state
         .panel_areas
@@ -1901,18 +1844,18 @@ fn render_search_page(
     mouse_state.panel_areas.push((
         Focus::Output,
         chunks[1],
-        app.output_store
+        app.core.output
             .get(&OutputSlot::SearchDetail)
             .map(|ctx| ctx.scroll)
             .unwrap_or(0),
     ));
 
-    let detail_lines = app.search.state.selected_detail();
+    let detail_lines = app.core.search.state.selected_detail();
     let detail_len = detail_lines.len();
     let visible_rows = chunks[1].height.saturating_sub(2) as usize;
-    app.output_for(OutputSlot::SearchDetail).visible_rows = visible_rows;
-    let detail_offset = app
-        .output_store
+    app.core.context(OutputSlot::SearchDetail).visible_rows = visible_rows;
+    let detail_offset = app.core
+        .output
         .get(&OutputSlot::SearchDetail)
         .map(|ctx| ctx.scroll)
         .unwrap_or(0)
@@ -1976,7 +1919,7 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: 
     let slot = app.active_output_slot();
     let max_scroll = lines.len().saturating_sub(visible_rows);
     let offset = {
-        let ctx = app.output_for(slot);
+        let ctx = app.core.context(slot);
         ctx.visible_rows = visible_rows;
         if ctx.follow_tail {
             ctx.scroll = max_scroll;

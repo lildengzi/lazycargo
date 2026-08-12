@@ -21,10 +21,10 @@ pub(super) fn render_search_input(frame: &mut Frame<'_>, app: &App, area: Rect) 
     } else {
         Style::default().fg(Color::Green)
     };
-    let input = if app.search.state.query.is_empty() {
+    let input = if app.core.search.state.query.is_empty() {
         "type crate name, Enter to search".to_owned()
     } else {
-        app.search.state.query.clone()
+        app.core.search.state.query.clone()
     };
     let widget = Paragraph::new(Line::from(input))
         .block(
@@ -186,7 +186,7 @@ pub(super) fn render_command_log(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().fg(Color::Green),
             ),
         ]),
-        InputMode::Normal if app.search.state.expanded => Line::from(vec![
+        InputMode::Normal if app.core.search.state.expanded => Line::from(vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(": inspect, "),
             Span::styled("a", Style::default().fg(Color::Green)),

@@ -1,5 +1,6 @@
 pub mod build_history;
 pub mod command;
+pub mod model;
 pub mod config;
 pub mod docs;
 pub mod dep_tree;
