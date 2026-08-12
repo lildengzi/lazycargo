@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::process::Child;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use lazycargo_search::SearchState;
 
@@ -9,6 +10,7 @@ use crate::core::build_history::BuildHistory;
 use crate::core::command::CommandSpec;
 use crate::core::config::AppConfig;
 use crate::core::dep_tree::DepNode;
+use crate::core::docs::{fetch_description, fetch_readme};
 use crate::core::process::{spawn_streaming, OutputLine, ProcessError};
 use crate::core::project::ProjectInfo;
 use crate::core::target_analyzer::DiskSnapshot;
@@ -117,6 +119,42 @@ pub struct SearchModel {
     pub state: SearchState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocsSource {
+    Readme,
+    Description,
+}
+
+pub struct DocsModel {
+    pub name: String,
+    pub version: String,
+    pub source: DocsSource,
+    pub started: Option<Instant>,
+}
+
+impl Default for DocsModel {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: String::new(),
+            source: DocsSource::Readme,
+            started: None,
+        }
+    }
+}
+
+pub enum DocsFetchResult {
+    Loaded {
+        name: String,
+        source: DocsSource,
+        text: String,
+    },
+    Failed {
+        name: String,
+        error: String,
+    },
+}
+
 pub struct CoreState {
     pub config: AppConfig,
     pub project: ProjectInfo,
@@ -128,6 +166,8 @@ pub struct CoreState {
     pub search: SearchModel,
     pub search_receiver: Option<Receiver<SearchJobResult>>,
     pub search_started: Option<Instant>,
+    pub docs: DocsModel,
+    pub docs_receiver: Option<Receiver<DocsFetchResult>>,
     pub diagnostics: Vec<String>,
 }
 
@@ -153,6 +193,8 @@ impl CoreState {
             },
             search_receiver: None,
             search_started: None,
+            docs: DocsModel::default(),
+            docs_receiver: None,
             diagnostics: Vec::new(),
         }
     }
@@ -248,6 +290,91 @@ impl CoreState {
                 self.processes.child = None;
                 self.processes.command.clear();
                 None
+            }
+        }
+    }
+
+    /// 标记 DocsReadme 初始行并异步拉取 README；README 失败回退 crates.io 描述。
+    #[allow(dead_code)]
+    pub fn open_docs(&mut self, name: &str, version: &str, timeout: Duration) {
+        self.docs.name = name.to_owned();
+        self.docs.version = version.to_owned();
+        self.docs.source = DocsSource::Readme;
+        self.docs.started = Some(Instant::now());
+        self.set_slot_lines(
+            OutputSlot::DocsReadme,
+            vec![format!("loading docs for {name}...")],
+        );
+        self.set_slot_lines(OutputSlot::DocsFallback, Vec::new());
+        let (tx, rx) = mpsc::channel();
+        self.docs_receiver = Some(rx);
+        let name = name.to_owned();
+        let version = version.to_owned();
+        thread::spawn(move || {
+            let result = match fetch_readme(&name, &version, timeout) {
+                Ok(text) => DocsFetchResult::Loaded {
+                    name: name.clone(),
+                    source: DocsSource::Readme,
+                    text,
+                },
+                Err(readme_error) => match fetch_description(&name, timeout) {
+                    Ok(text) => DocsFetchResult::Loaded {
+                        name: name.clone(),
+                        source: DocsSource::Description,
+                        text,
+                    },
+                    Err(description_error) => DocsFetchResult::Failed {
+                        name,
+                        error: format!("{readme_error}; description: {description_error}"),
+                    },
+                },
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// 若异步拉取已完成，把结果写入 DocsReadme / DocsFallback slot。
+    pub fn poll_docs(&mut self, max_lines: usize) {
+        let Some(receiver) = &self.docs_receiver else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.docs_receiver = None;
+                return;
+            }
+        };
+        self.docs_receiver = None;
+        match result {
+            DocsFetchResult::Loaded { name, source, text } => {
+                self.docs.name = name;
+                self.docs.source = source;
+                let slot = match source {
+                    DocsSource::Readme => OutputSlot::DocsReadme,
+                    DocsSource::Description => OutputSlot::DocsFallback,
+                };
+                if slot == OutputSlot::DocsFallback {
+                    self.set_slot_lines(OutputSlot::DocsReadme, Vec::new());
+                }
+                let ctx = self.context(slot);
+                ctx.lines = vec![text];
+                ctx.stream_rx = None;
+                ctx.scroll = 0;
+                ctx.follow_tail = false;
+                ctx.tree_nodes.clear();
+                ctx.trim_lines(max_lines);
+            }
+            DocsFetchResult::Failed { name, error } => {
+                self.set_slot_lines(OutputSlot::DocsReadme, Vec::new());
+                let ctx = self.context(OutputSlot::DocsFallback);
+                ctx.lines = vec![format!("failed to load docs for {name}: {error}")];
+                ctx.stream_rx = None;
+                ctx.scroll = 0;
+                ctx.follow_tail = false;
+                ctx.tree_nodes.clear();
+                ctx.trim_lines(max_lines);
             }
         }
     }
