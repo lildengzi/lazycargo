@@ -5,7 +5,6 @@ use crate::core::dep_tree;
 use crate::core::model::{CoreState, OutputSlot};
 use crate::core::project::{DependencyInfo, PackageInfo, ProjectInfo};
 use crate::core::util::{format_bytes, progress_bar};
-use crate::state::NavigationState;
 use crate::ui::controller::{BuildCoreTab, DependenciesTab, FocusPanel, WorkspaceTab, WorkspaceView};
 use crate::ui::HistoryEntry;
 
@@ -19,13 +18,14 @@ pub(crate) struct CommandItem {
 pub(crate) fn output_lines(
     core: &CoreState,
     view: &WorkspaceView,
-    nav: &NavigationState,
+    current_focus: FocusPanel,
+    last_status: &str,
     history: &[HistoryEntry],
 ) -> Vec<String> {
-    match nav.current_focus {
+    match current_focus {
         FocusPanel::Workspace => match view.ws_tab {
             WorkspaceTab::CrateInfo => workspace_detail_lines(core, view),
-            WorkspaceTab::Metrics => workspace_metrics_lines(core, view, history, &nav.last_status),
+            WorkspaceTab::Metrics => workspace_metrics_lines(core, view, history, last_status),
             WorkspaceTab::Target => target_analysis_lines(core, view),
         },
         FocusPanel::BuildCore => match view.build_tab {
@@ -90,6 +90,30 @@ pub(crate) fn dependency_items_for(
             )
         })
         .collect()
+}
+
+pub(crate) fn selected_dependency_name(
+    project: &ProjectInfo,
+    workspace_selected: usize,
+    selected: usize,
+) -> Option<String> {
+    let dependencies = if workspace_selected == 0 {
+        project
+            .workspace_packages
+            .first()
+            .map(|package| package.dependencies.as_slice())
+            .unwrap_or(project.dependencies.as_slice())
+    } else {
+        project
+            .workspace_packages
+            .get(workspace_selected.saturating_sub(1))
+            .map(|package| package.dependencies.as_slice())
+            .unwrap_or(project.dependencies.as_slice())
+    };
+
+    dependencies
+        .get(selected)
+        .map(|dependency| dependency.name.clone())
 }
 
 pub(crate) fn build_items() -> Vec<CommandItem> {
@@ -645,7 +669,7 @@ fn dependency_path_lines(
     ]
 }
 
-fn scope_label(project: &ProjectInfo, workspace_selected: usize) -> String {
+pub(crate) fn scope_label(project: &ProjectInfo, workspace_selected: usize) -> String {
     if workspace_selected == 0 {
         "workspace".to_owned()
     } else {

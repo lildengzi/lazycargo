@@ -61,9 +61,12 @@ use components::{
     search_input::render_search_input,
     style::{output_line_to_lines, panel_block, semantic_output_line},
 };
-use pages::workspace::view::{build_items, dependency_items_for, output_lines, workspace_items};
+use pages::workspace::view::{
+    build_items, dependency_items_for, output_lines, selected_dependency_name, workspace_items,
+};
 use terminal_support::{copy_to_clipboard, first_url, open_url};
 
+#[derive(Clone)]
 pub(crate) struct HistoryEntry {
     pub(crate) command: String,
     pub(crate) success: bool,
@@ -521,8 +524,14 @@ impl App {
     fn scroll_right(&mut self, delta: isize) {
         self.set_focus(Focus::Output);
         let slot = self.active_output_slot();
-        let content_len =
-            output_lines(&self.core, &self.view_state(), &self.navigation, &self.history).len();
+        let content_len = output_lines(
+            &self.core,
+            &self.view_state(),
+            self.navigation.current_focus,
+            &self.navigation.last_status,
+            &self.history,
+        )
+        .len();
         let scroll = {
             let ctx = self.core.context(slot);
             let visible_rows = ctx.visible_rows.max(1);
@@ -1855,7 +1864,13 @@ fn render_search_page(
 
 fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: &mut MouseState) {
     let visible_rows = area.height.saturating_sub(2) as usize;
-    let lines = output_lines(&app.core, &app.view_state(), &app.navigation, &app.history);
+    let lines = output_lines(
+        &app.core,
+        &app.view_state(),
+        app.navigation.current_focus,
+        &app.navigation.last_status,
+        &app.history,
+    );
     let slot = app.active_output_slot();
     let max_scroll = lines.len().saturating_sub(visible_rows);
     let offset = {
@@ -2002,30 +2017,6 @@ fn embedded_tab_areas(app: &App, area: Rect) -> Vec<(Rect, ContextTab)> {
     areas
 }
 
-fn selected_dependency_name(
-    project: &ProjectInfo,
-    workspace_selected: usize,
-    selected: usize,
-) -> Option<String> {
-    let dependencies = if workspace_selected == 0 {
-        project
-            .workspace_packages
-            .first()
-            .map(|package| package.dependencies.as_slice())
-            .unwrap_or(project.dependencies.as_slice())
-    } else {
-        project
-            .workspace_packages
-            .get(workspace_selected.saturating_sub(1))
-            .map(|package| package.dependencies.as_slice())
-            .unwrap_or(project.dependencies.as_slice())
-    };
-
-    dependencies
-        .get(selected)
-        .map(|dependency| dependency.name.clone())
-}
-
 fn project_health_snapshot(project: &ProjectInfo, disk: &DiskSnapshot) -> Vec<String> {
     vec![
         format!("project: {} {}", project.name, project.version),
@@ -2158,4 +2149,129 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x.saturating_add(area.width)
         && row >= area.y
         && row < area.y.saturating_add(area.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    use crate::core::project::{DependencyInfo, DependencyKind, PackageInfo, TargetInfo};
+    use crate::ui::pages::workspace::controller::WorkspacePage;
+
+    fn sample_project() -> ProjectInfo {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let manifest = format!("{root}/Cargo.toml");
+        let target = TargetInfo {
+            name: "testapp".to_owned(),
+            kind: vec!["lib".to_owned()],
+            src_path: format!("{root}/src/lib.rs"),
+        };
+        let package = PackageInfo {
+            name: "testapp".to_owned(),
+            version: "0.1.0".to_owned(),
+            manifest_path: manifest.clone(),
+            rust_version: None,
+            targets: vec![target.clone()],
+            dependencies: vec![DependencyInfo {
+                name: "serde".to_owned(),
+                req: "1".to_owned(),
+                kind: DependencyKind::Normal,
+                features: Vec::new(),
+                optional: false,
+                uses_default_features: true,
+            }],
+            features: Vec::new(),
+        };
+        ProjectInfo {
+            name: "testapp".to_owned(),
+            version: "0.1.0".to_owned(),
+            workspace_root: root,
+            manifest_path: manifest,
+            packages: vec!["testapp".to_owned()],
+            targets: vec![target],
+            dependencies: package.dependencies.clone(),
+            features: Vec::new(),
+            workspace_packages: vec![package],
+            dependency_packages: Vec::new(),
+            rustc_version: "rustc 1.88.0".to_owned(),
+        }
+    }
+
+    fn page_from_app(app: &App) -> WorkspacePage {
+        let mut page = WorkspacePage::new();
+        page.view = app.view_state();
+        page.nav.focus = app.navigation.focus;
+        page.nav.current_focus = app.navigation.current_focus;
+        page.nav.input_mode = app.navigation.input_mode;
+        page.nav.filter = app.navigation.filter.clone();
+        page.nav.message = app.navigation.message.clone();
+        page.nav.last_status = app.navigation.last_status.clone();
+        page.nav.menu_open = app.navigation.menu_open;
+        page.nav.menu_selected = app.navigation.menu_selected;
+        page.nav.copy_mode = app.navigation.copy_mode;
+        page.nav.command_preview = app.navigation.command_preview.clone();
+        page.history = app.history.clone();
+        page
+    }
+
+    #[test]
+    fn workspace_page_render_matches_app_render() {
+        let mut app = App::new(sample_project(), AppConfig::default());
+        let width = 120;
+        let height = 40;
+
+        let mut app_mouse = MouseState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                app_mouse = render(frame, &mut app);
+            })
+            .unwrap();
+
+        let page = page_from_app(&app);
+        let mut page_mouse = MouseState::default();
+        let mut page_terminal = Terminal::new(TestBackend::new(width, height - 1)).unwrap();
+        page_terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page_mouse = page.render(&app.core, frame, area);
+            })
+            .unwrap();
+
+        let app_buffer = terminal.backend().buffer().clone();
+        let page_buffer = page_terminal.backend().buffer().clone();
+        for y in 0..height - 1 {
+            for x in 0..width {
+                assert_eq!(
+                    app_buffer[(x, y)],
+                    page_buffer[(x, y)],
+                    "buffer mismatch at ({x},{y})"
+                );
+            }
+        }
+
+        let app_panels: Vec<_> = app_mouse
+            .panel_areas
+            .iter()
+            .filter(|(focus, _, _)| *focus != Focus::CommandLog)
+            .cloned()
+            .collect();
+        assert_eq!(app_panels, page_mouse.panel_areas);
+        assert_eq!(app_mouse.link_areas, page_mouse.link_areas);
+        assert_eq!(app_mouse.tab_areas, page_mouse.tab_areas);
+        assert_eq!(
+            app_mouse.right_scrollbar_area,
+            page_mouse.right_scrollbar_area
+        );
+        assert_eq!(
+            app_mouse.right_scrollbar_content_len,
+            page_mouse.right_scrollbar_content_len
+        );
+        assert_eq!(
+            app_mouse.right_scrollbar_visible_rows,
+            page_mouse.right_scrollbar_visible_rows
+        );
+    }
 }
