@@ -18,11 +18,11 @@ use crate::core::task::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
     SearchJobKind,
 };
-use crate::ui::controller::{
-    contains, focus_under, link_under, panel_under, DependenciesTab, Focus, InputMode, MouseState,
-    Page, WorkspaceTab,
-};
 use crate::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
+use crate::ui::controller::{
+    contains, focus_under, link_under, panel_under, Focus, InputMode, MouseState, Page,
+    WorkspaceTab,
+};
 use crate::ui::pages::search::view::render_search_page;
 use crate::ui::terminal_support::{copy_to_clipboard, open_url};
 use crate::ui::HistoryEntry;
@@ -81,7 +81,6 @@ impl SearchPage {
             search_expanded: core.search.state.expanded,
             focus: self.nav.focus,
             ws_tab: WorkspaceTab::CrateInfo,
-            deps_tab: DependenciesTab::Features,
         };
         match keymap::normal_key_action(key, context) {
             NormalKeyAction::BackFromSearch => {
@@ -672,8 +671,8 @@ mod tests {
     use super::*;
     use crate::core::config::AppConfig;
     use crate::core::project::ProjectInfo;
-    use crate::core::task::SearchJobResult;
     use crate::core::target_analyzer::DiskSnapshot;
+    use crate::core::task::SearchJobResult;
 
     fn sample_project() -> ProjectInfo {
         ProjectInfo {
@@ -716,4 +715,3 @@ mod tests {
         assert!(core.search_started.is_none());
     }
 }
-

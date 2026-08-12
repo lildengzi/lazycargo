@@ -15,7 +15,7 @@
 A lazygit-style TUI for Rust projects.
 
 - **Workspace panel** — see which package you're operating on
-- **Dependencies panel** — feature states, interactive tree, conflict detection
+- **Dependencies panel** — feature states, duplicate-version summary, reverse inspect
 - **Build panel** — check/build/test with scope control
 - **Search** — crates.io search + inspect in the TUI
 - **target/ analysis** — per-crate disk usage, stale cleanup
@@ -54,7 +54,7 @@ The CLI exposes a supported subset of Cargo options (clap strict mode — unknow
 
 ## Key Bindings
 
-`1` `2` `3` — panels | `Tab` — cycle | `[` `]` — tabs | `s` — search | `/` — filter | `c` — check | `b` — build | `t` — tree | `i` — inverse tree | `d` — read docs in TUI | `D` — open docs.rs | `m` — copy mode | `q` — quit
+`1` `2` `3` — panels | `Tab` — cycle | `[` `]` — tabs | `s` — search | `/` — filter | `c` — check | `b` — build | `t` — duplicate versions | `i` — reverse inspect | `d` — read docs in TUI | `D` — open docs.rs | `m` — copy mode | `q` — quit
 
 ## Acknowledgments
 

@@ -9,7 +9,6 @@ use lazycargo_search::SearchState;
 use crate::core::build_history::BuildHistory;
 use crate::core::command::CommandSpec;
 use crate::core::config::AppConfig;
-use crate::core::dep_tree::DepNode;
 use crate::core::docs::{fetch_description, fetch_readme};
 use crate::core::process::{spawn_streaming, OutputLine, ProcessError};
 use crate::core::project::ProjectInfo;
@@ -36,7 +35,6 @@ pub struct ContextOutput {
     pub stream_rx: Option<mpsc::Receiver<OutputLine>>,
     pub scroll: usize,
     pub follow_tail: bool,
-    pub tree_nodes: Vec<DepNode>,
 }
 
 impl ContextOutput {
@@ -205,9 +203,6 @@ impl CoreState {
         ctx.stream_rx = None;
         ctx.scroll = 0;
         ctx.follow_tail = false;
-        if slot != OutputSlot::DepsTree {
-            ctx.tree_nodes.clear();
-        }
     }
 
     pub fn drain_all_streams(&mut self, max_lines: usize) {
@@ -235,7 +230,6 @@ impl CoreState {
             ctx.scroll = usize::MAX;
             ctx.follow_tail = true;
             ctx.stream_rx = None;
-            ctx.tree_nodes.clear();
         }
         match spawn_streaming(&spec.program, &spec.args, &[("CARGO_TERM_COLOR", "always")]) {
             Ok((child, rx)) => {
@@ -350,7 +344,6 @@ impl CoreState {
                 ctx.stream_rx = None;
                 ctx.scroll = 0;
                 ctx.follow_tail = false;
-                ctx.tree_nodes.clear();
                 ctx.trim_lines(max_lines);
             }
             DocsFetchResult::Failed { name, error } => {
@@ -360,7 +353,6 @@ impl CoreState {
                 ctx.stream_rx = None;
                 ctx.scroll = 0;
                 ctx.follow_tail = false;
-                ctx.tree_nodes.clear();
                 ctx.trim_lines(max_lines);
             }
         }

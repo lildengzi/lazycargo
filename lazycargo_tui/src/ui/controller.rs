@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -81,7 +79,7 @@ pub(crate) enum BuildCoreTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DependenciesTab {
     Features,
-    DependencyTree,
+    Duplicates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +108,7 @@ impl ContextTab {
             Self::Build(BuildCoreTab::TaskConfig) => "Task Config",
             Self::Build(BuildCoreTab::LiveOutput) => "Live Output",
             Self::Dependencies(DependenciesTab::Features) => "Features",
-            Self::Dependencies(DependenciesTab::DependencyTree) => "Dependency Tree",
+            Self::Dependencies(DependenciesTab::Duplicates) => "Duplicates",
         }
     }
 }
@@ -137,7 +135,6 @@ pub(crate) struct WorkspaceView {
     pub build_tab: BuildCoreTab,
     pub deps_tab: DependenciesTab,
     pub selected: SelectedIndex,
-    pub tree_expanded: HashMap<String, bool>,
     pub search_return_focus: Focus,
 }
 
@@ -147,7 +144,6 @@ pub(crate) struct SelectedIndex {
     pub dependency: usize,
     pub build: usize,
     pub target_crate: usize,
-    pub tree: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -162,7 +158,6 @@ impl Default for WorkspaceView {
             build_tab: BuildCoreTab::TaskConfig,
             deps_tab: DependenciesTab::Features,
             selected: SelectedIndex::default(),
-            tree_expanded: HashMap::new(),
             search_return_focus: Focus::Workspace,
         }
     }

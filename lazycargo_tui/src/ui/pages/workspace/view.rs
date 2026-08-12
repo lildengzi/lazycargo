@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use crate::core::build_history::format_duration_ms;
-use crate::core::dep_tree;
 use crate::core::model::{CoreState, OutputSlot};
 use crate::core::project::{DependencyInfo, PackageInfo, ProjectInfo};
 use crate::core::util::{format_bytes, progress_bar};
@@ -36,16 +35,7 @@ pub(crate) fn output_lines(
         },
         FocusPanel::Dependencies => match view.deps_tab {
             DependenciesTab::Features => dependency_detail_lines(core, view),
-            DependenciesTab::DependencyTree
-                if core
-                    .output
-                    .get(&OutputSlot::DepsTree)
-                    .map(|ctx| ctx.tree_nodes.is_empty())
-                    .unwrap_or(true) =>
-            {
-                core.slot_lines(OutputSlot::DepsTree)
-            }
-            DependenciesTab::DependencyTree => dependency_tree_lines(core, view),
+            DependenciesTab::Duplicates => core.slot_lines(OutputSlot::DepsTree),
         },
     }
 }
@@ -459,21 +449,6 @@ fn disk_pressure_bar(size: u64) -> String {
         format_bytes(size),
         format_bytes(SOFT_LIMIT)
     )
-}
-
-fn dependency_tree_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
-    let tree_nodes = core
-        .output
-        .get(&OutputSlot::DepsTree)
-        .map(|ctx| ctx.tree_nodes.as_slice())
-        .unwrap_or(&[]);
-    let visible = dep_tree::flatten_visible(tree_nodes);
-    let selected = visible.get(view.selected.tree);
-    let mut lines = Vec::new();
-    lines.extend(dep_tree::render_tree_lines(tree_nodes, view.selected.tree));
-    lines.extend([String::new(), "Selected detail".to_owned()]);
-    lines.extend(dep_tree::node_detail(selected));
-    lines
 }
 
 fn history_lines(history: &[HistoryEntry]) -> Vec<String> {

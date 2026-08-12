@@ -11,9 +11,8 @@ This roadmap keeps the project focused on workflows where a TUI is meaningfully 
 
 ## v0.2.0: Dependency Investigation
 
-- Make dependency tree nodes fully interactive.
-- Preserve expand/collapse state across tree refreshes.
-- Highlight duplicate crate versions.
+- Highlight duplicate crate versions (done — `t` shows `cargo tree --duplicates`).
+- Reverse dependency inspection on a selected dependency (done — `i`).
 - Show clearer feature-source chains: why a feature is enabled and which parent dependency pulled it in.
 
 ## v0.3.0: Target Disk Analysis

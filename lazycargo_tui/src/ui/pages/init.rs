@@ -7,9 +7,9 @@ use ratatui::Frame;
 
 use crate::core::command::CommandSpec;
 use crate::core::model::{CoreState, OutputSlot};
+use crate::keymap::{self, ProjectNewConfirmAction};
 use crate::ui::components::dialog::centered_rect;
 use crate::ui::controller::{InputMode, MouseState, Page};
-use crate::keymap::{self, ProjectNewConfirmAction};
 
 /// InitPage 持有的导航状态子集（Task 15 由根 App 在调用前同步）。
 pub(crate) struct InitNav {

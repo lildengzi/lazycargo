@@ -1,12 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ui::controller::{DependenciesTab, Focus, WorkspaceTab};
+use crate::ui::controller::{Focus, WorkspaceTab};
 
 pub(crate) struct NormalKeyContext {
     pub(crate) search_expanded: bool,
     pub(crate) focus: Focus,
     pub(crate) ws_tab: WorkspaceTab,
-    pub(crate) deps_tab: DependenciesTab,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,10 +30,8 @@ pub(crate) enum NormalKeyAction {
     CleanTarget,
     CargoCheck,
     CargoBuild,
-    TreeOffline,
-    TreeWithFetch,
-    InverseTreeOffline,
-    InverseTreeWithFetch,
+    ShowDuplicates,
+    InverseDependency,
     PreviewAdd,
     OpenCrates,
     OpenDocs,
@@ -42,8 +39,6 @@ pub(crate) enum NormalKeyAction {
     OpenDocsJump,
     OpenRepository,
     CopySearchDetail,
-    CollapseTree,
-    ToggleTree,
     OpenSearch,
     Noop,
 }
@@ -109,7 +104,7 @@ pub(crate) const HELP_SECTIONS: &[HelpSection] = &[
         entries: &[
             HelpEntry {
                 key: "[ / ]",
-                label: "switch Detail / Output / Tree / Metrics",
+                label: "switch Detail / Output / Metrics",
             },
             HelpEntry {
                 key: "click tab",
@@ -129,12 +124,12 @@ pub(crate) const HELP_SECTIONS: &[HelpSection] = &[
                 label: "cargo check / build",
             },
             HelpEntry {
-                key: "t / i",
-                label: "offline tree / inverse tree",
+                key: "t",
+                label: "show duplicate dependency versions",
             },
             HelpEntry {
-                key: "T / I",
-                label: "tree / inverse tree with fetch",
+                key: "i",
+                label: "reverse-inspect selected dependency",
             },
             HelpEntry {
                 key: "s",
@@ -231,24 +226,12 @@ pub(crate) fn normal_key_action(key: KeyEvent, context: NormalKeyContext) -> Nor
         }
         KeyCode::Char('c') => NormalKeyAction::CargoCheck,
         KeyCode::Char('b') => NormalKeyAction::CargoBuild,
-        KeyCode::Char('t') => NormalKeyAction::TreeOffline,
-        KeyCode::Char('T') => NormalKeyAction::TreeWithFetch,
-        KeyCode::Char('i') => NormalKeyAction::InverseTreeOffline,
-        KeyCode::Char('I') => NormalKeyAction::InverseTreeWithFetch,
+        KeyCode::Char('t') => NormalKeyAction::ShowDuplicates,
+        KeyCode::Char('i') => NormalKeyAction::InverseDependency,
         KeyCode::Char('a') => NormalKeyAction::PreviewAdd,
         KeyCode::Char('o') if context.search_expanded => NormalKeyAction::OpenCrates,
         KeyCode::Char('g') if context.search_expanded => NormalKeyAction::OpenRepository,
         KeyCode::Char('y') if context.search_expanded => NormalKeyAction::CopySearchDetail,
-        KeyCode::Left | KeyCode::Char('h')
-            if context.deps_tab == DependenciesTab::DependencyTree =>
-        {
-            NormalKeyAction::CollapseTree
-        }
-        KeyCode::Right | KeyCode::Char('l')
-            if context.deps_tab == DependenciesTab::DependencyTree =>
-        {
-            NormalKeyAction::ToggleTree
-        }
         KeyCode::Char('s') => NormalKeyAction::OpenSearch,
         _ => NormalKeyAction::Noop,
     }
@@ -286,7 +269,6 @@ mod tests {
                 Focus::Workspace
             },
             ws_tab: WorkspaceTab::CrateInfo,
-            deps_tab: DependenciesTab::Features,
         }
     }
 

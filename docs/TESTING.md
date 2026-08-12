@@ -39,10 +39,9 @@ cargo build --workspace --release
 ## Dependencies
 
 - Move through direct dependencies and inspect Features.
-- Run `t` for `cargo tree`.
-- Run `i` for inverse dependency tree on a selected dependency.
-- Expand/collapse dependency tree nodes with `Enter`, `h`, and `l`.
-- Confirm fallback raw tree output appears if parsing fails.
+- Run `t` for duplicate dependency versions (`cargo tree --duplicates`).
+- Run `i` for reverse dependency inspection on a selected dependency.
+- Confirm raw `cargo tree` output appears in the Duplicates tab.
 
 ## Target Analysis
 

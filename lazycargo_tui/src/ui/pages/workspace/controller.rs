@@ -21,7 +21,6 @@ use crate::core::command::{
     is_doc_command, is_project_init_command, CargoTask, CargoTaskKind, CommandSpec,
     FeatureSelection, Profile, TaskScope,
 };
-use crate::core::dep_tree;
 use crate::core::docs::{docs_root_url, local_docs_index};
 use crate::core::model::{CoreState, OutputSlot};
 use crate::core::process::extract_diagnostics;
@@ -29,6 +28,7 @@ use crate::core::project::ProjectInfo;
 use crate::core::target_analyzer::{self, analyze_target_async, DiskSnapshot};
 use crate::core::task::{info_progress_detail, run_info_job, SearchJobConfig};
 use crate::core::util::format_bytes;
+use crate::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::components::panel::render_panel;
 use crate::ui::components::scrollbar::render_scrollbar;
 use crate::ui::components::style::output_line_to_lines;
@@ -36,7 +36,6 @@ use crate::ui::controller::{
     contains, focus_under, link_under, panel_under, tab_under, BuildCoreTab, ContextTab,
     DependenciesTab, Focus, FocusPanel, InputMode, MouseState, Page, WorkspaceTab, WorkspaceView,
 };
-use crate::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::pages::workspace::view::{
     build_items, dependency_items_for, output_lines, scope_label, selected_dependency_name,
     workspace_items,
@@ -98,7 +97,6 @@ impl WorkspacePage {
             search_expanded: core.search.state.expanded,
             focus: self.nav.focus,
             ws_tab: self.view.ws_tab,
-            deps_tab: self.view.deps_tab,
         };
         match keymap::normal_key_action(key, context) {
             NormalKeyAction::BackFromSearch => {
@@ -122,10 +120,6 @@ impl WorkspacePage {
                     && self.view.ws_tab == WorkspaceTab::Target
                 {
                     self.move_target_crate_selection(core, -1);
-                } else if self.view.deps_tab == DependenciesTab::DependencyTree
-                    && self.nav.current_focus == FocusPanel::Dependencies
-                {
-                    self.move_tree_selection(core, -1);
                 } else {
                     self.scroll_right(core, -1);
                 }
@@ -135,10 +129,6 @@ impl WorkspacePage {
                     && self.view.ws_tab == WorkspaceTab::Target
                 {
                     self.move_target_crate_selection(core, 1);
-                } else if self.view.deps_tab == DependenciesTab::DependencyTree
-                    && self.nav.current_focus == FocusPanel::Dependencies
-                {
-                    self.move_tree_selection(core, 1);
                 } else {
                     self.scroll_right(core, 1);
                 }
@@ -151,17 +141,13 @@ impl WorkspacePage {
                 self.nav.filter.clear();
                 self.nav.message = format!("filter {}: ", self.nav.focus.title());
             }
-            NormalKeyAction::CollapseTree => self.collapse_selected_tree_node(core),
-            NormalKeyAction::ToggleTree => self.toggle_selected_tree_node(core),
             NormalKeyAction::RefreshTarget => self.refresh_disk_snapshot(core),
             NormalKeyAction::DryRunCleanTarget => self.clean_target_stale(core, true),
             NormalKeyAction::CleanTarget => self.clean_target_stale(core, false),
             NormalKeyAction::CargoCheck => self.run_cargo(core, Focus::Build, &["check"]),
             NormalKeyAction::CargoBuild => self.run_cargo(core, Focus::Build, &["build"]),
-            NormalKeyAction::TreeOffline => self.run_tree(core, false),
-            NormalKeyAction::TreeWithFetch => self.run_tree(core, true),
-            NormalKeyAction::InverseTreeOffline => self.run_inverse_tree(core, false),
-            NormalKeyAction::InverseTreeWithFetch => self.run_inverse_tree(core, true),
+            NormalKeyAction::ShowDuplicates => self.run_duplicates(core),
+            NormalKeyAction::InverseDependency => self.run_inverse(core),
             NormalKeyAction::PreviewAdd => self.preview_add(core),
             NormalKeyAction::OpenCrates => self.open_search_link(core, SearchLinkTarget::Crates),
             NormalKeyAction::OpenDocs => self.open_search_link(core, SearchLinkTarget::Docs),
@@ -362,9 +348,6 @@ impl WorkspacePage {
                 }
             }
             Focus::Dependencies => self.inspect_dependency(core),
-            Focus::Output if self.view.deps_tab == DependenciesTab::DependencyTree => {
-                self.toggle_selected_tree_node(core);
-            }
             Focus::Output
                 if self.nav.current_focus == FocusPanel::Workspace
                     && self.view.ws_tab == WorkspaceTab::Target =>
@@ -431,16 +414,6 @@ impl WorkspacePage {
     }
 
     fn selected_dependency(&self, core: &CoreState) -> Option<String> {
-        if self.view.deps_tab == DependenciesTab::DependencyTree {
-            let nodes = core
-                .output
-                .get(&OutputSlot::DepsTree)
-                .map(|ctx| ctx.tree_nodes.as_slice())
-                .unwrap_or(&[]);
-            return dep_tree::flatten_visible(nodes)
-                .get(self.view.selected.tree)
-                .map(|node| node.name.clone());
-        }
         selected_dependency_name(
             &core.project,
             self.view.selected.workspace,
@@ -470,54 +443,6 @@ impl WorkspacePage {
             Ok(()) => self.open_url_message_success(&url),
             Err(error) => self.open_url_message_error(error),
         }
-    }
-
-    fn move_tree_selection(&mut self, core: &mut CoreState, delta: isize) {
-        let len = core
-            .output
-            .get(&OutputSlot::DepsTree)
-            .map(|ctx| dep_tree::flatten_visible(&ctx.tree_nodes).len())
-            .unwrap_or(0);
-        if len == 0 {
-            self.scroll_right(core, delta);
-            return;
-        }
-        self.view.selected.tree = (self.view.selected.tree as isize + delta)
-            .clamp(0, len.saturating_sub(1) as isize) as usize;
-        let selected = self.view.selected.tree;
-        dep_tree::apply_selected(&mut core.context(OutputSlot::DepsTree).tree_nodes, selected);
-        self.nav.message = format!("tree node {}", self.view.selected.tree + 1);
-    }
-
-    fn toggle_selected_tree_node(&mut self, core: &mut CoreState) {
-        let selected = self.view.selected.tree;
-        let toggled = {
-            let ctx = core.context(OutputSlot::DepsTree);
-            dep_tree::toggle_node(&mut ctx.tree_nodes, selected).map(|key| {
-                let expanded = dep_tree::flatten_visible(&ctx.tree_nodes)
-                    .get(selected)
-                    .map(|node| node.expanded)
-                    .unwrap_or(false);
-                (key, expanded)
-            })
-        };
-        if let Some((key, expanded)) = toggled {
-            self.view.tree_expanded.insert(key, expanded);
-            self.nav.message = "tree node toggled".to_owned();
-        }
-    }
-
-    fn collapse_selected_tree_node(&mut self, core: &mut CoreState) {
-        let selected = self.view.selected.tree;
-        let Some(key) = dep_tree::set_node_expanded(
-            &mut core.context(OutputSlot::DepsTree).tree_nodes,
-            selected,
-            false,
-        ) else {
-            return;
-        };
-        self.view.tree_expanded.insert(key, false);
-        self.nav.message = "tree node collapsed".to_owned();
     }
 
     fn toggle_copy_mode(&mut self) {
@@ -689,9 +614,6 @@ impl WorkspacePage {
         }
         if success && is_doc_command(&command) {
             self.open_local_docs(core);
-        }
-        if slot == OutputSlot::DepsTree {
-            self.update_dependency_tree_from_output(core);
         }
         self.nav.message = format!("finished: {command}");
     }
@@ -896,7 +818,7 @@ impl WorkspacePage {
         if detail_focus == Focus::Build {
             self.view.build_tab = BuildCoreTab::LiveOutput;
         } else if detail_focus == Focus::Dependencies {
-            self.view.deps_tab = DependenciesTab::DependencyTree;
+            self.view.deps_tab = DependenciesTab::Duplicates;
         }
 
         match core.spawn_command(&spec, slot) {
@@ -908,20 +830,14 @@ impl WorkspacePage {
         }
     }
 
-    fn run_tree(&mut self, core: &mut CoreState, allow_fetch: bool) {
-        if allow_fetch {
-            self.run_cargo(core, Focus::Dependencies, &["tree", "-e", "features"]);
-        } else {
-            self.run_cargo(
-                core,
-                Focus::Dependencies,
-                &["tree", "--offline", "-e", "features"],
-            );
-        }
-        self.view.deps_tab = DependenciesTab::DependencyTree;
+    /// `t`：展示重复依赖版本摘要（cargo tree --duplicates）。
+    fn run_duplicates(&mut self, core: &mut CoreState) {
+        self.run_cargo(core, Focus::Dependencies, &["tree", "--duplicates"]);
+        self.view.deps_tab = DependenciesTab::Duplicates;
     }
 
-    fn run_inverse_tree(&mut self, core: &mut CoreState, allow_fetch: bool) {
+    /// `i`：反向查看选中依赖被谁引入（cargo tree -i <name>）。
+    fn run_inverse(&mut self, core: &mut CoreState) {
         let Some(dependency) = selected_dependency_name(
             &core.project,
             self.view.selected.workspace,
@@ -934,39 +850,8 @@ impl WorkspacePage {
             return;
         };
 
-        if allow_fetch {
-            self.run_cargo(
-                core,
-                Focus::Dependencies,
-                &["tree", "-e", "features", "-i", &dependency],
-            );
-        } else {
-            self.run_cargo(
-                core,
-                Focus::Dependencies,
-                &["tree", "--offline", "-e", "features", "-i", &dependency],
-            );
-        }
-        self.view.deps_tab = DependenciesTab::DependencyTree;
-    }
-
-    /// tree 命令的产出解析，由 finish_cargo_output（DepsTree 分支）触发。
-    fn update_dependency_tree_from_output(&mut self, core: &mut CoreState) {
-        let lines = core.slot_lines(OutputSlot::DepsTree);
-        let nodes = dep_tree::parse_tree_output(&lines, &self.view.tree_expanded);
-        if nodes.is_empty() {
-            core.context(OutputSlot::DepsTree).lines.insert(
-                0,
-                "structured tree parse unavailable; showing raw cargo tree output".to_owned(),
-            );
-            return;
-        }
-        let visible_len = dep_tree::flatten_visible(&nodes).len();
-        self.view.selected.tree = self.view.selected.tree.min(visible_len.saturating_sub(1));
-        let selected = self.view.selected.tree;
-        let ctx = core.context(OutputSlot::DepsTree);
-        ctx.tree_nodes = nodes;
-        dep_tree::apply_selected(&mut ctx.tree_nodes, selected);
+        self.run_cargo(core, Focus::Dependencies, &["tree", "-i", &dependency]);
+        self.view.deps_tab = DependenciesTab::Duplicates;
     }
 
     fn preview_add(&mut self, core: &mut CoreState) {
@@ -1098,7 +983,7 @@ impl WorkspacePage {
             },
             FocusPanel::Dependencies => match self.view.deps_tab {
                 DependenciesTab::Features => OutputSlot::DepsFeatures,
-                DependenciesTab::DependencyTree => OutputSlot::DepsTree,
+                DependenciesTab::Duplicates => OutputSlot::DepsTree,
             },
         }
     }
@@ -1120,7 +1005,7 @@ impl WorkspacePage {
             ],
             FocusPanel::Dependencies => vec![
                 ContextTab::Dependencies(DependenciesTab::Features),
-                ContextTab::Dependencies(DependenciesTab::DependencyTree),
+                ContextTab::Dependencies(DependenciesTab::Duplicates),
             ],
         }
     }
@@ -1491,7 +1376,6 @@ impl Page for WorkspacePage {
 mod tests {
     use super::*;
     use crate::core::config::AppConfig;
-    use crate::core::dep_tree::DepNode;
     use crate::core::project::{DependencyInfo, DependencyKind, ProjectInfo};
     use crate::core::target_analyzer::DiskSnapshot;
 
@@ -1518,57 +1402,17 @@ mod tests {
         }
     }
 
-    fn dep_node(name: &str, version: &str, depth: usize, children: Vec<DepNode>) -> DepNode {
-        DepNode {
-            name: name.to_owned(),
-            version: version.to_owned(),
-            children,
-            expanded: true,
-            depth,
-            is_duplicate: false,
-            other_versions: Vec::new(),
-            is_conflict: false,
-            features: Vec::new(),
-            feature_source: Vec::new(),
-            dependency_type: "normal".to_owned(),
-            is_selected: false,
-        }
-    }
-
-    fn core_with_tree() -> CoreState {
-        let mut core = CoreState::new(
+    /// Features tab：取 dependency 索引对应的 crate 名。
+    #[test]
+    fn selected_dependency_uses_dependency_index() {
+        let mut page = WorkspacePage::new();
+        page.view.deps_tab = DependenciesTab::Features;
+        page.view.selected.dependency = 0;
+        let core = CoreState::new(
             sample_project(),
             AppConfig::default(),
             DiskSnapshot::pending(&[]),
         );
-        let ctx = core.context(OutputSlot::DepsTree);
-        ctx.tree_nodes = vec![dep_node(
-            "tokio",
-            "1.0",
-            0,
-            vec![dep_node("serde", "1.0", 1, Vec::new())],
-        )];
-        core
-    }
-
-    /// DependencyTree tab 下 `d`/`D` 必须取树内选中节点（view.selected.tree）的 crate 名，
-    /// 而不是 Features 列表的 dependency 索引（回归 Minor-4）。
-    #[test]
-    fn selected_dependency_uses_tree_node_in_dependency_tree_tab() {
-        let mut page = WorkspacePage::new();
-        page.view.deps_tab = DependenciesTab::DependencyTree;
-        page.view.selected.tree = 1;
-        let core = core_with_tree();
-        assert_eq!(page.selected_dependency(&core), Some("serde".to_owned()));
-    }
-
-    /// Features tab 下保持原行为：取 dependency 索引对应的 crate 名，与 tree_nodes 无关。
-    #[test]
-    fn selected_dependency_uses_dependency_index_in_features_tab() {
-        let mut page = WorkspacePage::new();
-        page.view.deps_tab = DependenciesTab::Features;
-        page.view.selected.dependency = 0;
-        let core = core_with_tree();
         assert_eq!(page.selected_dependency(&core), Some("anyhow".to_owned()));
     }
 }
