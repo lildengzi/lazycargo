@@ -3,9 +3,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 
-use super::terminal_support::first_url;
+use crate::ui::terminal_support::first_url;
 
-pub(super) fn output_line_to_lines(line: &String) -> Vec<Line<'static>> {
+pub(crate) fn output_line_to_lines(line: &String) -> Vec<Line<'static>> {
     if line.contains('\u{1b}') {
         return line
             .into_text()
@@ -15,7 +15,7 @@ pub(super) fn output_line_to_lines(line: &String) -> Vec<Line<'static>> {
     vec![semantic_output_line(line)]
 }
 
-pub(super) fn semantic_output_line(raw: &str) -> Line<'static> {
+pub(crate) fn semantic_output_line(raw: &str) -> Line<'static> {
     let trimmed = raw.trim();
     let lower = trimmed.to_lowercase();
 
@@ -94,7 +94,7 @@ pub(super) fn semantic_output_line(raw: &str) -> Line<'static> {
     Line::from(raw.to_owned())
 }
 
-pub(super) fn panel_block(title: impl Into<String>, focused: bool) -> Block<'static> {
+pub(crate) fn panel_block(title: impl Into<String>, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::default()
             .fg(Color::Green)

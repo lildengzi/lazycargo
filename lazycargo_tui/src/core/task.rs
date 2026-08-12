@@ -5,29 +5,28 @@ use lazycargo_search::{
     search_error_detail, search_timeout_detail, CrateInfoReport, CrateSearchResult,
 };
 
-use crate::util::{animated_progress_bar, progress_bar};
-
-use super::runner::{command_output_with_timeout, split_output};
+use crate::core::process::{run_captured, split_output};
+use crate::core::util::{animated_progress_bar, progress_bar};
 
 #[derive(Debug, Clone)]
-pub(super) struct SearchJobConfig {
-    pub(super) limit: usize,
-    pub(super) network_timeout: Duration,
-    pub(super) info_timeout: Duration,
+pub struct SearchJobConfig {
+    pub limit: usize,
+    pub network_timeout: Duration,
+    pub info_timeout: Duration,
 }
 
-pub(super) struct SearchJobResult {
-    pub(super) kind: SearchJobKind,
-    pub(super) command: String,
-    pub(super) duration: Duration,
-    pub(super) success: bool,
-    pub(super) results: Option<Vec<CrateSearchResult>>,
-    pub(super) detail: Vec<String>,
-    pub(super) message: String,
-    pub(super) status: String,
+pub struct SearchJobResult {
+    pub kind: SearchJobKind,
+    pub command: String,
+    pub duration: Duration,
+    pub success: bool,
+    pub results: Option<Vec<CrateSearchResult>>,
+    pub detail: Vec<String>,
+    pub message: String,
+    pub status: String,
 }
 
-pub(super) enum SearchJobKind {
+pub enum SearchJobKind {
     Search,
     Info {
         name: String,
@@ -35,7 +34,7 @@ pub(super) enum SearchJobKind {
     },
 }
 
-pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJobResult {
+pub fn run_search_job(query: String, config: SearchJobConfig) -> SearchJobResult {
     let command = format!("crates.io api search {query}");
     let started = Instant::now();
     if let Ok(results) = search_crates_registry(&query, config.network_timeout, config.limit) {
@@ -63,7 +62,7 @@ pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJo
     let limit = config.limit.clamp(1, 100).to_string();
     let command = format!("cargo search {query} --limit {limit}");
     let started = Instant::now();
-    let output = command_output_with_timeout(
+    let output = run_captured(
         "cargo",
         &["search", &query, "--limit", &limit],
         config.network_timeout,
@@ -127,10 +126,10 @@ pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJo
     }
 }
 
-pub(super) fn run_info_job(result: CrateSearchResult, config: SearchJobConfig) -> SearchJobResult {
+pub fn run_info_job(result: CrateSearchResult, config: SearchJobConfig) -> SearchJobResult {
     let command = format!("cargo info {}", result.name);
     let started = Instant::now();
-    let output = command_output_with_timeout("cargo", &["info", &result.name], config.info_timeout);
+    let output = run_captured("cargo", &["info", &result.name], config.info_timeout);
     let duration = started.elapsed();
 
     match output {
@@ -223,7 +222,7 @@ pub(super) fn run_info_job(result: CrateSearchResult, config: SearchJobConfig) -
     }
 }
 
-pub(super) fn search_progress_detail(query: &str, elapsed: Duration) -> Vec<String> {
+pub fn search_progress_detail(query: &str, elapsed: Duration) -> Vec<String> {
     vec![
         format!("searching crates: {query}"),
         format!("elapsed: {:.1}s", elapsed.as_secs_f32()),
@@ -236,7 +235,7 @@ pub(super) fn search_progress_detail(query: &str, elapsed: Duration) -> Vec<Stri
     ]
 }
 
-pub(super) fn info_progress_detail(name: &str, elapsed: Duration) -> Vec<String> {
+pub fn info_progress_detail(name: &str, elapsed: Duration) -> Vec<String> {
     vec![
         format!("crate: {name}"),
         format!("status: running cargo info"),

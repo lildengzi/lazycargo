@@ -6,12 +6,22 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub(crate) enum OutputLine {
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ProcessError {
+    #[error("failed to run command: {source}")]
+    Io { source: std::io::Error },
+    #[error("already running: {command}")]
+    AlreadyRunning { command: String },
+}
+
+pub enum OutputLine {
     Stdout(String),
     Stderr(String),
 }
 
-pub(super) fn spawn_streaming<A>(
+pub fn spawn_streaming<A>(
     program: &OsStr,
     args: &[A],
     envs: &[(&str, &str)],
@@ -58,21 +68,29 @@ where
     Ok((child, rx))
 }
 
-pub(super) fn command_output_with_timeout(
+pub fn run_captured(
     program: &str,
     args: &[&str],
     timeout: Duration,
-) -> io::Result<Option<Output>> {
+) -> Result<Option<Output>, ProcessError> {
     let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|source| ProcessError::Io { source })?;
     let started = Instant::now();
 
     loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(Some);
+        if child
+            .try_wait()
+            .map_err(|source| ProcessError::Io { source })?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map(Some)
+                .map_err(|source| ProcessError::Io { source });
         }
 
         if started.elapsed() >= timeout {
@@ -85,14 +103,14 @@ pub(super) fn command_output_with_timeout(
     }
 }
 
-pub(super) fn split_output(bytes: &[u8]) -> Vec<String> {
+pub fn split_output(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .lines()
         .map(str::to_owned)
         .collect()
 }
 
-pub(super) fn extract_diagnostics(lines: &[String]) -> Vec<String> {
+pub fn extract_diagnostics(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .filter(|line| {

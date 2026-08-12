@@ -1,8 +1,9 @@
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::core::store::{self, StoreError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -33,24 +34,29 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load_or_create() -> Result<Self, ConfigError> {
-        let path = config_path();
+    pub fn load_or_create() -> Result<Self, StoreError> {
+        let path = store::config_path();
         if !path.exists() {
             let config = Self::default();
             save_config_to_path(&path, &config)?;
             return Ok(config);
         }
 
-        let text = fs::read_to_string(&path)
-            .map_err(|error| ConfigError::new(path.clone(), error.to_string()))?;
-        let mut config = serde_json::from_str::<Self>(&text)
-            .map_err(|error| ConfigError::new(path.clone(), error.to_string()))?;
+        let text = std::fs::read_to_string(&path).map_err(|source| StoreError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let mut config =
+            serde_json::from_str::<Self>(&text).map_err(|source| StoreError::Json {
+                path: path.clone(),
+                source,
+            })?;
         config.normalize();
         Ok(config)
     }
 
     pub fn config_path() -> PathBuf {
-        config_path()
+        store::config_path()
     }
 
     pub fn network_timeout(&self) -> Duration {
@@ -73,45 +79,8 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigError {
-    path: PathBuf,
-    message: String,
-}
-
-impl ConfigError {
-    fn new(path: PathBuf, message: String) -> Self {
-        Self { path, message }
-    }
-
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.path.display(), self.message)
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("lazycargo")
-        .join("config.json")
-}
-
-fn save_config_to_path(path: &PathBuf, config: &AppConfig) -> Result<(), ConfigError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| ConfigError::new(path.clone(), error.to_string()))?;
-    }
-    let text = serde_json::to_string_pretty(config)
-        .map_err(|error| ConfigError::new(path.clone(), error.to_string()))?;
-    fs::write(path, text).map_err(|error| ConfigError::new(path.clone(), error.to_string()))
+fn save_config_to_path(path: &Path, config: &AppConfig) -> Result<(), StoreError> {
+    store::atomic_write_json(path, config)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 版本要求：rust 1.81+（README 声明），ratatui 0.30.2，crossterm 0.29.0
+- 版本要求：rust 1.88+（clap 4.6 / tui-markdown 0.3.9 的 MSRV；Task 19 需同步 README 徽章，把 1.81 改为 1.88）
 - core/ 模块**禁止**依赖 ratatui / crossterm / 任何 `Frame`/`KeyEvent` 类型（crossterm 的 KeyEvent 只允许出现在 ui/）
 - `lazycargo_search` 独立 crate 不动（它是 publishable，PKGBUILD 依赖它）
 - 最终删除的源文件：`src/ui.rs`、`src/ui/dashboard.rs`、`src/ui/layout.rs`、`src/ui/style.rs`、`src/ui/search_job.rs`、`src/ui/runner.rs`、`src/ui/terminal_support.rs`、`src/state/mod.rs`、`src/metadata.rs`、`src/cargo_task.rs`、`src/crates.rs`、`src/build_history.rs`、`src/config.rs`、`src/args.rs`、`src/target_analyzer.rs`、`src/dep_tree.rs`、`src/util.rs`
@@ -1534,7 +1534,7 @@ Expected: 全部 PASS
 
 - [ ] **Step 3: 更新文档**
 
-README 快捷键表加：`d` 阅读文档 / `D` 打开 docs.rs；CLI 段改为真执行+智能 scope 说明。说明 lazycargo 依赖新增（clap/tui-markdown 等）。
+README 快捷键表加：`d` 阅读文档 / `D` 打开 docs.rs；CLI 段改为真执行+智能 scope 说明。说明 lazycargo 依赖新增（clap/tui-markdown 等）。**把 README 的 rust 版本徽章从 1.81 更新为 1.88**（`docs/pics` 无关，改 README.md 与 README.zh-CN.md 中 `rust-1.81+` 字样）。
 
 - [ ] **Step 4: 最终手动验收**
 

@@ -1,4 +1,4 @@
-use crate::cargo_task::CommandSpec;
+use crate::core::command::CommandSpec;
 use std::ffi::OsString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

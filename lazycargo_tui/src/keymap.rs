@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ui::{DependenciesTab, Focus, WorkspaceTab};
+use crate::ui::controller::{DependenciesTab, Focus, WorkspaceTab};
 
 pub(crate) struct NormalKeyContext {
     pub(crate) search_expanded: bool,
@@ -9,6 +9,7 @@ pub(crate) struct NormalKeyContext {
     pub(crate) deps_tab: DependenciesTab,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalKeyAction {
     BackFromSearch,
     Quit,
@@ -37,6 +38,8 @@ pub(crate) enum NormalKeyAction {
     PreviewAdd,
     OpenCrates,
     OpenDocs,
+    OpenDocsInline,
+    OpenDocsJump,
     OpenRepository,
     CopySearchDetail,
     CollapseTree,
@@ -163,8 +166,12 @@ pub(crate) const HELP_SECTIONS: &[HelpSection] = &[
                 label: "preview cargo add",
             },
             HelpEntry {
-                key: "o/d/g",
-                label: "open crates/docs/repo",
+                key: "d / D",
+                label: "read docs in TUI / open docs browser",
+            },
+            HelpEntry {
+                key: "o/g",
+                label: "open crates/repo",
             },
             HelpEntry {
                 key: "y",
@@ -210,6 +217,12 @@ pub(crate) fn normal_key_action(key: KeyEvent, context: NormalKeyContext) -> Nor
         KeyCode::Char('r') if context.ws_tab == WorkspaceTab::Target => {
             NormalKeyAction::RefreshTarget
         }
+        KeyCode::Char('d') if context.search_expanded => NormalKeyAction::OpenDocsInline,
+        KeyCode::Char('D') if context.search_expanded => NormalKeyAction::OpenDocs,
+        KeyCode::Char('d') if context.focus == Focus::Dependencies => {
+            NormalKeyAction::OpenDocsInline
+        }
+        KeyCode::Char('D') if context.focus == Focus::Dependencies => NormalKeyAction::OpenDocsJump,
         KeyCode::Char('d') if context.ws_tab == WorkspaceTab::Target => {
             NormalKeyAction::DryRunCleanTarget
         }
@@ -224,7 +237,6 @@ pub(crate) fn normal_key_action(key: KeyEvent, context: NormalKeyContext) -> Nor
         KeyCode::Char('I') => NormalKeyAction::InverseTreeWithFetch,
         KeyCode::Char('a') => NormalKeyAction::PreviewAdd,
         KeyCode::Char('o') if context.search_expanded => NormalKeyAction::OpenCrates,
-        KeyCode::Char('d') if context.search_expanded => NormalKeyAction::OpenDocs,
         KeyCode::Char('g') if context.search_expanded => NormalKeyAction::OpenRepository,
         KeyCode::Char('y') if context.search_expanded => NormalKeyAction::CopySearchDetail,
         KeyCode::Left | KeyCode::Char('h')
@@ -257,5 +269,70 @@ pub(crate) fn project_new_confirm_action(key: KeyEvent) -> ProjectNewConfirmActi
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ProjectNewConfirmAction::Yes,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ProjectNewConfirmAction::No,
         _ => ProjectNewConfirmAction::Noop,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn context(deps: bool, search: bool) -> NormalKeyContext {
+        NormalKeyContext {
+            search_expanded: search,
+            focus: if deps {
+                Focus::Dependencies
+            } else {
+                Focus::Workspace
+            },
+            ws_tab: WorkspaceTab::CrateInfo,
+            deps_tab: DependenciesTab::Features,
+        }
+    }
+
+    fn key(char: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(char), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn lowercase_d_in_deps_opens_docs_inline() {
+        assert_eq!(
+            normal_key_action(key('d'), context(true, false)),
+            NormalKeyAction::OpenDocsInline
+        );
+    }
+
+    #[test]
+    fn uppercase_d_in_deps_opens_docs_jump() {
+        assert_eq!(
+            normal_key_action(key('D'), context(true, false)),
+            NormalKeyAction::OpenDocsJump
+        );
+    }
+
+    #[test]
+    fn lowercase_d_in_search_opens_docs_inline() {
+        assert_eq!(
+            normal_key_action(key('d'), context(false, true)),
+            NormalKeyAction::OpenDocsInline
+        );
+    }
+
+    #[test]
+    fn uppercase_d_in_search_opens_docs_browser() {
+        assert_eq!(
+            normal_key_action(key('D'), context(false, true)),
+            NormalKeyAction::OpenDocs
+        );
+    }
+
+    #[test]
+    fn target_tab_d_still_dry_runs_clean() {
+        let mut ctx = context(false, false);
+        ctx.ws_tab = WorkspaceTab::Target;
+        assert_eq!(
+            normal_key_action(key('d'), ctx),
+            NormalKeyAction::DryRunCleanTarget
+        );
     }
 }

@@ -29,7 +29,7 @@ pub struct ProjectInfo {
     pub rustc_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
@@ -139,6 +139,25 @@ impl ProjectInfo {
             dependency_packages,
             rustc_version: rustc_version(),
         })
+    }
+
+    /// 当前目录无 Cargo.toml 时的降级项目信息（limited mode）。
+    pub fn fallback() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let name = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("workspace")
+            .to_owned();
+        Self {
+            name,
+            version: "<no Cargo.toml>".to_owned(),
+            workspace_root: cwd.to_string_lossy().into_owned(),
+            manifest_path: cwd.join("Cargo.toml").to_string_lossy().into_owned(),
+            rustc_version: "<unknown>".to_owned(),
+            ..Self::default()
+        }
     }
 }
 
