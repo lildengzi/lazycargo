@@ -44,6 +44,12 @@ use crate::keymap::{
 use crate::state::{NavigationState, SelectionState};
 use lazycargo_search::{SearchLinkTarget, SearchState};
 
+mod components;
+pub mod controller;
+mod pages;
+
+use controller::*;
+
 mod dashboard;
 mod layout;
 mod style;
@@ -57,129 +63,10 @@ use layout::{
 use style::{output_line_to_lines, panel_block, semantic_output_line};
 use terminal_support::{copy_to_clipboard, first_url, open_url};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Focus {
-    Build,
-    Dependencies,
-    Search,
-    Workspace,
-    CommandLog,
-    Output,
-}
-
-impl Focus {
-    fn from_digit(value: char) -> Self {
-        match value {
-            '1' => Self::Workspace,
-            '2' => Self::Build,
-            '3' => Self::Dependencies,
-            '0' => Self::Output,
-            _ => Self::Workspace,
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::Workspace => Self::Build,
-            Self::Build => Self::Dependencies,
-            Self::Dependencies => Self::Output,
-            Self::Search => Self::Workspace,
-            Self::Output => Self::Workspace,
-            Self::CommandLog => Self::Workspace,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Build => "[2]-Build Core",
-            Self::Dependencies => "[3]-Dependencies",
-            Self::Search => "[Search]",
-            Self::Workspace => "[1]-Workspace",
-            Self::CommandLog => "[?]-Keys",
-            Self::Output => "[0]-Output / Detail",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputMode {
-    Normal,
-    Filter,
-    CrateSearch,
-    ProjectNewConfirm,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FocusPanel {
-    Workspace,
-    BuildCore,
-    Dependencies,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceTab {
-    CrateInfo,
-    Metrics,
-    Target,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuildCoreTab {
-    TaskConfig,
-    LiveOutput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DependenciesTab {
-    Features,
-    DependencyTree,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextTab {
-    Workspace(WorkspaceTab),
-    Build(BuildCoreTab),
-    Dependencies(DependenciesTab),
-}
-
-impl FocusPanel {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Workspace => "Workspace",
-            Self::BuildCore => "Build Core",
-            Self::Dependencies => "Dependencies",
-        }
-    }
-}
-
-impl ContextTab {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Workspace(WorkspaceTab::CrateInfo) => "Crate Info",
-            Self::Workspace(WorkspaceTab::Metrics) => "Metrics",
-            Self::Workspace(WorkspaceTab::Target) => "Target",
-            Self::Build(BuildCoreTab::TaskConfig) => "Task Config",
-            Self::Build(BuildCoreTab::LiveOutput) => "Live Output",
-            Self::Dependencies(DependenciesTab::Features) => "Features",
-            Self::Dependencies(DependenciesTab::DependencyTree) => "Dependency Tree",
-        }
-    }
-}
-
 struct HistoryEntry {
     command: String,
     success: bool,
     duration: Duration,
-}
-
-#[derive(Default)]
-struct MouseState {
-    panel_areas: Vec<(Focus, Rect, usize)>,
-    link_areas: Vec<(Rect, String)>,
-    tab_areas: Vec<(Rect, ContextTab)>,
-    right_scrollbar_area: Option<Rect>,
-    right_scrollbar_content_len: usize,
-    right_scrollbar_visible_rows: usize,
 }
 
 struct App {

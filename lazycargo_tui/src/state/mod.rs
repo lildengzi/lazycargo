@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::ui::{BuildCoreTab, DependenciesTab, Focus, FocusPanel, InputMode, WorkspaceTab};
+use crate::ui::controller::{
+    BuildCoreTab, DependenciesTab, Focus, FocusPanel, InputMode, WorkspaceTab,
+};
 
 pub(crate) struct NavigationState {
     pub(crate) focus: Focus,

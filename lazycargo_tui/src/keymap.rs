@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ui::{DependenciesTab, Focus, WorkspaceTab};
+use crate::ui::controller::{DependenciesTab, Focus, WorkspaceTab};
 
 pub(crate) struct NormalKeyContext {
     pub(crate) search_expanded: bool,
