@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::core::build_history::{is_recordable_command, BuildEntry, CrateTiming};
@@ -51,16 +51,18 @@ mod pages;
 use controller::*;
 
 mod dashboard;
-mod layout;
-mod style;
 mod terminal_support;
 
-use dashboard::{build_items, dependency_items_for, output_lines, workspace_items};
-use layout::{
-    render_command_log, render_menu, render_panel, render_project_new_confirm, render_scrollbar,
-    render_search_input,
+use components::{
+    command_log::render_command_log,
+    dialog::centered_rect,
+    menu::render_keys_dialog,
+    panel::render_panel,
+    scrollbar::render_scrollbar,
+    search_input::render_search_input,
+    style::{output_line_to_lines, panel_block, semantic_output_line},
 };
-use style::{output_line_to_lines, panel_block, semantic_output_line};
+use dashboard::{build_items, dependency_items_for, output_lines, workspace_items};
 use terminal_support::{copy_to_clipboard, first_url, open_url};
 
 struct HistoryEntry {
@@ -1500,6 +1502,72 @@ impl App {
             }
         }
     }
+
+    fn command_log_line(&self) -> Line<'static> {
+        match self.navigation.input_mode {
+            InputMode::CrateSearch => Line::from(vec![
+                Span::styled("search: ", Style::default().fg(Color::Yellow)),
+                Span::raw(keymap::SEARCH_STATUS_HINT),
+                Span::styled(
+                    format!("  {}", self.navigation.last_status),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            InputMode::Filter => Line::from(vec![
+                Span::styled("filter: ", Style::default().fg(Color::Yellow)),
+                Span::raw(self.navigation.filter.clone()),
+                Span::styled(
+                    keymap::FILTER_STATUS_HINT,
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            InputMode::ProjectNewConfirm => Line::from(vec![
+                Span::styled("no Cargo.toml: ", Style::default().fg(Color::Yellow)),
+                Span::raw(keymap::INIT_PROJECT_PROMPT),
+                Span::styled("y", Style::default().fg(Color::Green)),
+                Span::raw("/"),
+                Span::styled("n", Style::default().fg(Color::Green)),
+            ]),
+            InputMode::Normal if self.navigation.copy_mode => Line::from(vec![
+                Span::styled("copy: ", Style::default().fg(Color::Yellow)),
+                Span::raw(keymap::COPY_STATUS_HINT),
+                Span::styled(
+                    format!("  {}", self.navigation.last_status),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            InputMode::Normal if self.core.search.state.expanded => Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Green)),
+                Span::raw(": inspect, "),
+                Span::styled("a", Style::default().fg(Color::Green)),
+                Span::raw(": add, "),
+                Span::styled("q", Style::default().fg(Color::Green)),
+                Span::raw(": back, "),
+                Span::styled("x", Style::default().fg(Color::Green)),
+                Span::raw(": keys"),
+                Span::styled(
+                    format!("  {}", self.navigation.last_status),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            InputMode::Normal => Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Green)),
+                Span::raw(": run/inspect, "),
+                Span::styled("s", Style::default().fg(Color::Green)),
+                Span::raw(": search, "),
+                Span::styled("[ ]", Style::default().fg(Color::Green)),
+                Span::raw(": tabs, "),
+                Span::styled("x", Style::default().fg(Color::Green)),
+                Span::raw(": keys, "),
+                Span::styled("q", Style::default().fg(Color::Green)),
+                Span::raw(": quit"),
+                Span::styled(
+                    format!("  {}", self.navigation.last_status),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+        }
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -1640,9 +1708,9 @@ fn render(frame: &mut Frame<'_>, app: &mut App) -> MouseState {
     mouse_state
         .panel_areas
         .push((Focus::CommandLog, root[1], 0));
-    render_command_log(frame, app, root[1]);
+    render_command_log(frame, &[app.command_log_line()], root[1]);
     if app.navigation.menu_open {
-        render_menu(frame, app);
+        render_keys_dialog(frame, &app.navigation.last_status);
     }
     if app.navigation.input_mode == InputMode::ProjectNewConfirm {
         render_project_new_confirm(frame);
@@ -1662,36 +1730,40 @@ fn render_left(frame: &mut Frame<'_>, app: &App, area: Rect, mouse_state: &mut M
 
     let offset = render_panel(
         frame,
-        app,
         chunks[0],
-        Focus::Workspace,
-        workspace_items(&app.core.project),
+        &workspace_items(&app.core.project),
         app.selection.workspace_selected,
+        app.navigation.focus == Focus::Workspace,
+        Focus::Workspace.title(),
+        &app.navigation.filter,
     );
     mouse_state
         .panel_areas
         .push((Focus::Workspace, chunks[0], offset));
+    let build_lines = build_items()
+        .into_iter()
+        .map(|item| item.label.to_owned())
+        .collect::<Vec<_>>();
     let offset = render_panel(
         frame,
-        app,
         chunks[1],
-        Focus::Build,
-        build_items()
-            .into_iter()
-            .map(|item| item.label.to_owned())
-            .collect(),
+        &build_lines,
         app.selection.build_selected,
+        app.navigation.focus == Focus::Build,
+        Focus::Build.title(),
+        &app.navigation.filter,
     );
     mouse_state
         .panel_areas
         .push((Focus::Build, chunks[1], offset));
     let offset = render_panel(
         frame,
-        app,
         chunks[2],
-        Focus::Dependencies,
-        dependency_items_for(&app.core.project, app.selection.workspace_selected),
+        &dependency_items_for(&app.core.project, app.selection.workspace_selected),
         app.selection.dependency_selected,
+        app.navigation.focus == Focus::Dependencies,
+        Focus::Dependencies.title(),
+        &app.navigation.filter,
     );
     mouse_state
         .panel_areas
@@ -1714,16 +1786,22 @@ fn render_search_page(
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(chunks[0]);
 
-    render_search_input(frame, app, left[0]);
+    render_search_input(
+        frame,
+        left[0],
+        &app.core.search.state.query,
+        app.navigation.input_mode == InputMode::CrateSearch,
+    );
     mouse_state.panel_areas.push((Focus::Search, left[0], 0));
 
     let offset = render_panel(
         frame,
-        app,
         left[1],
-        Focus::Search,
-        app.core.search.state.result_items(),
+        &app.core.search.state.result_items(),
         app.core.search.state.selected,
+        app.navigation.focus == Focus::Search,
+        Focus::Search.title(),
+        &app.navigation.filter,
     );
     mouse_state
         .panel_areas
@@ -1794,9 +1872,9 @@ fn render_search_page(
     render_scrollbar(
         frame,
         scrollbar_area,
+        detail_offset,
         detail_len,
         visible_rows,
-        detail_offset,
     );
 }
 
@@ -1838,7 +1916,39 @@ fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: 
     mouse_state.right_scrollbar_area = (lines.len() > visible_rows).then_some(scrollbar_area);
     mouse_state.right_scrollbar_content_len = lines.len();
     mouse_state.right_scrollbar_visible_rows = visible_rows;
-    render_scrollbar(frame, scrollbar_area, lines.len(), visible_rows, offset);
+    render_scrollbar(frame, scrollbar_area, offset, lines.len(), visible_rows);
+}
+
+fn render_project_new_confirm(frame: &mut Frame<'_>) {
+    let area = centered_rect(54, 28, frame.area());
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "No Cargo project found",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from("This directory has no Cargo.toml."),
+        Line::from("Initialize it as a Cargo project now?"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Y", Style::default().fg(Color::Green)),
+            Span::raw(" yes, run cargo init    "),
+            Span::styled("N / Esc", Style::default().fg(Color::Red)),
+            Span::raw(" no"),
+        ]),
+    ];
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(Clear, area);
+    frame.render_widget(widget, area);
 }
 
 fn output_block(app: &mut App, area: Rect, mouse_state: &mut MouseState) -> Block<'static> {

@@ -146,24 +146,6 @@ pub(super) fn build_items() -> Vec<CommandItem> {
     ]
 }
 
-pub(super) fn apply_filter(lines: Vec<String>, filter: &str, active: bool) -> Vec<String> {
-    if !active || filter.is_empty() {
-        return lines;
-    }
-    lines
-        .into_iter()
-        .filter(|line| line.to_lowercase().contains(&filter.to_lowercase()))
-        .collect()
-}
-
-pub(super) fn list_offset(selected: usize, visible_rows: usize, len: usize) -> usize {
-    if len <= visible_rows {
-        return 0;
-    }
-
-    selected.saturating_sub(visible_rows.saturating_sub(1))
-}
-
 fn workspace_detail_lines(app: &App) -> Vec<String> {
     let package = selected_package(&app.core.project, app.selection.workspace_selected);
     let package_name = package

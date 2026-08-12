@@ -1,4 +1,5 @@
 pub mod command_log;
+pub mod dialog;
 pub mod menu;
 pub mod panel;
 pub mod reader;
