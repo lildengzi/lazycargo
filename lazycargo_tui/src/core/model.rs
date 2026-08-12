@@ -6,9 +6,10 @@ use std::time::Instant;
 use lazycargo_search::SearchState;
 
 use crate::core::build_history::BuildHistory;
+use crate::core::command::CommandSpec;
 use crate::core::config::AppConfig;
 use crate::core::dep_tree::DepNode;
-use crate::core::process::OutputLine;
+use crate::core::process::{spawn_streaming, OutputLine, ProcessError};
 use crate::core::project::ProjectInfo;
 use crate::core::target_analyzer::DiskSnapshot;
 use crate::core::task::SearchJobResult;
@@ -105,6 +106,13 @@ pub struct ProcessState {
     pub slot: OutputSlot,
 }
 
+pub struct ProcessFinish {
+    pub slot: OutputSlot,
+    pub command: String,
+    pub duration: std::time::Duration,
+    pub status: std::process::ExitStatus,
+}
+
 pub struct SearchModel {
     pub state: SearchState,
 }
@@ -176,6 +184,71 @@ impl CoreState {
     pub fn drain_all_streams(&mut self, max_lines: usize) {
         for ctx in self.output.values_mut() {
             ctx.drain_stream(max_lines);
+        }
+    }
+
+    /// 若已有进程在跑返回 Err；否则写初始行、spawn、记录 processes。
+    pub fn spawn_command(
+        &mut self,
+        spec: &CommandSpec,
+        slot: OutputSlot,
+    ) -> Result<(), ProcessError> {
+        if self.processes.child.is_some() {
+            return Err(ProcessError::AlreadyRunning {
+                command: self.processes.command.clone(),
+            });
+        }
+        let command = spec.display();
+        {
+            let ctx = self.context(slot);
+            ctx.lines.clear();
+            ctx.lines.push(format!("$ {command}"));
+            ctx.scroll = usize::MAX;
+            ctx.follow_tail = true;
+            ctx.stream_rx = None;
+            ctx.tree_nodes.clear();
+        }
+        match spawn_streaming(
+            &spec.program,
+            &spec.args,
+            &[("CARGO_TERM_COLOR", "always")],
+        ) {
+            Ok((child, rx)) => {
+                self.processes.child = Some(child);
+                self.processes.command = command;
+                self.processes.start = std::time::Instant::now();
+                self.processes.slot = slot;
+                self.context(slot).stream_rx = Some(rx);
+                Ok(())
+            }
+            Err(error) => {
+                self.set_slot_lines(slot, vec![format!("failed to run {command}: {error}")]);
+                Err(ProcessError::Io { source: error })
+            }
+        }
+    }
+
+    /// 排空所有 stream 并 try_wait；进程结束返回 Some(ProcessFinish)，否则 None。
+    pub fn poll_process(&mut self, max_lines: usize) -> Option<ProcessFinish> {
+        self.drain_all_streams(max_lines);
+        let child = self.processes.child.as_mut()?;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let child = self.processes.child.take()?;
+                drop(child);
+                let command = std::mem::take(&mut self.processes.command);
+                let duration = self.processes.start.elapsed();
+                let slot = self.processes.slot;
+                self.context(slot).drain_stream(max_lines);
+                self.context(slot).stream_rx = None;
+                Some(ProcessFinish { slot, command, duration, status })
+            }
+            Ok(None) => None,
+            Err(_) => {
+                self.processes.child = None;
+                self.processes.command.clear();
+                None
+            }
         }
     }
 }

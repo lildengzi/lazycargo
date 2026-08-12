@@ -12,6 +12,8 @@ use thiserror::Error;
 pub enum ProcessError {
     #[error("failed to run command: {source}")]
     Io { source: std::io::Error },
+    #[error("already running: {command}")]
+    AlreadyRunning { command: String },
 }
 
 pub enum OutputLine {

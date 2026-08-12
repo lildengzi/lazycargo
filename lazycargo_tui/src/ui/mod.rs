@@ -31,7 +31,7 @@ use crate::core::config::AppConfig;
 use crate::core::dep_tree;
 use crate::core::project::ProjectInfo;
 use crate::core::model::{ContextOutput, CoreState, OutputSlot};
-use crate::core::process::{extract_diagnostics, spawn_streaming};
+use crate::core::process::extract_diagnostics;
 use crate::core::target_analyzer::{self, DiskSnapshot};
 use crate::core::task::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
@@ -929,11 +929,6 @@ impl App {
     }
 
     fn run_cargo(&mut self, detail_focus: Focus, args: &[&str]) {
-        if self.core.processes.child.is_some() {
-            self.navigation.message = format!("already running: {}", self.core.processes.command);
-            return;
-        }
-
         let spec = self.build_cargo_command(args);
         let command = spec.display();
         let slot = match detail_focus {
@@ -951,61 +946,19 @@ impl App {
             self.navigation.deps_tab = DependenciesTab::DependencyTree;
         }
 
-        {
-            let ctx = self.core.context(slot);
-            ctx.lines.clear();
-            ctx.lines.push(format!("$ {command}"));
-            ctx.scroll = usize::MAX;
-            ctx.follow_tail = true;
-            ctx.stream_rx = None;
-            ctx.tree_nodes.clear();
-        }
-
-        match spawn_streaming(&spec.program, &spec.args, &[("CARGO_TERM_COLOR", "always")]) {
-            Ok((child, rx)) => {
-                self.core.processes.child = Some(child);
-                self.core.processes.command = command;
-                self.core.processes.start = Instant::now();
-                self.core.processes.slot = slot;
-                self.core.context(slot).stream_rx = Some(rx);
-            }
-            Err(error) => {
+        match self.core.spawn_command(&spec, slot) {
+            Ok(()) => {}
+            Err(_) => {
                 self.navigation.last_status = "error".to_owned();
-                self.core.set_slot_lines(slot, vec![format!("failed to run {command}: {error}")]);
-                self.core.diagnostics = vec![format!("runner error: {error}")];
-                self.navigation.message = format!("failed: {command}");
+                self.navigation.message = format!("failed: {}", spec.display());
             }
         }
     }
 
     fn drain_all_streams(&mut self) {
         let max_lines = self.core.config.output_max_lines;
-        self.core.drain_all_streams(max_lines);
-
-        let Some(child) = &mut self.core.processes.child else {
-            return;
-        };
-
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let Some(child) = self.core.processes.child.take() else {
-                    return;
-                };
-                drop(child);
-                let command = std::mem::take(&mut self.core.processes.command);
-                let duration = self.core.processes.start.elapsed();
-                let slot = self.core.processes.slot;
-                self.core.context(slot).drain_stream(max_lines);
-                self.core.context(slot).stream_rx = None;
-                self.finish_cargo_output(slot, command, duration, status);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.navigation.message = format!("wait failed: {error}");
-                self.navigation.last_status = "wait failed".to_owned();
-                self.core.processes.child = None;
-                self.core.processes.command.clear();
-            }
+        if let Some(finish) = self.core.poll_process(max_lines) {
+            self.finish_cargo_output(finish.slot, finish.command, finish.duration, finish.status);
         }
     }
 
