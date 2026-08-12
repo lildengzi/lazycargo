@@ -27,6 +27,7 @@ dirs.workspace = true
 lazycargo_search = { path = "../lazycargo_search", version = "0.2.0" }
 open = "5.3"
 ratatui.workspace = true
+reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3"
