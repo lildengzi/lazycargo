@@ -31,3 +31,6 @@ Thumbs.db
 *.7z
 dist/
 release/
+
+# Git worktrees
+.worktrees/
