@@ -1,5 +1,9 @@
 use std::cell::Cell;
 use std::io;
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyEvent};
 use crossterm::execute;
@@ -9,8 +13,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::core::command::{
+    CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
+};
 use crate::core::dep_tree;
 use crate::core::model::{CoreState, OutputSlot};
+use crate::core::project::ProjectInfo;
+use crate::core::target_analyzer::{self, DiskSnapshot};
+use crate::core::task::{info_progress_detail, run_info_job, SearchJobConfig};
+use crate::core::util::format_bytes;
 use crate::ui::components::panel::render_panel;
 use crate::ui::components::scrollbar::render_scrollbar;
 use crate::ui::components::style::output_line_to_lines;
@@ -23,7 +34,9 @@ use crate::ui::pages::workspace::view::{
     build_items, dependency_items_for, output_lines, scope_label, selected_dependency_name,
     workspace_items,
 };
+use crate::ui::terminal_support::{copy_to_clipboard, open_url};
 use crate::ui::HistoryEntry;
+use lazycargo_search::{SearchLinkTarget, SearchState};
 
 /// WorkspacePage 持有的导航状态子集（从 `state::NavigationState` 复制，Task 15 由根 App 在调用前同步）。
 pub(crate) struct WorkspaceNav {
@@ -144,22 +157,25 @@ impl WorkspacePage {
             }
             NormalKeyAction::CollapseTree => self.collapse_selected_tree_node(core),
             NormalKeyAction::ToggleTree => self.toggle_selected_tree_node(core),
-            NormalKeyAction::RefreshTarget
-            | NormalKeyAction::DryRunCleanTarget
-            | NormalKeyAction::CleanTarget
-            | NormalKeyAction::CargoCheck
-            | NormalKeyAction::CargoBuild
-            | NormalKeyAction::TreeOffline
-            | NormalKeyAction::TreeWithFetch
-            | NormalKeyAction::InverseTreeOffline
-            | NormalKeyAction::InverseTreeWithFetch
-            | NormalKeyAction::PreviewAdd
-            | NormalKeyAction::OpenCrates
-            | NormalKeyAction::OpenDocs
-            | NormalKeyAction::OpenRepository
-            | NormalKeyAction::CopySearchDetail
-            | NormalKeyAction::OpenSearch => {
-                // TODO(Task 15): core actions (cargo/process/search)
+            NormalKeyAction::RefreshTarget => self.refresh_disk_snapshot(core),
+            NormalKeyAction::DryRunCleanTarget => self.clean_target_stale(core, true),
+            NormalKeyAction::CleanTarget => self.clean_target_stale(core, false),
+            NormalKeyAction::CargoCheck => self.run_cargo(core, Focus::Build, &["check"]),
+            NormalKeyAction::CargoBuild => self.run_cargo(core, Focus::Build, &["build"]),
+            NormalKeyAction::TreeOffline => self.run_tree(core, false),
+            NormalKeyAction::TreeWithFetch => self.run_tree(core, true),
+            NormalKeyAction::InverseTreeOffline => self.run_inverse_tree(core, false),
+            NormalKeyAction::InverseTreeWithFetch => self.run_inverse_tree(core, true),
+            NormalKeyAction::PreviewAdd => self.preview_add(core),
+            NormalKeyAction::OpenCrates => self.open_search_link(core, SearchLinkTarget::Crates),
+            NormalKeyAction::OpenDocs => self.open_search_link(core, SearchLinkTarget::Docs),
+            NormalKeyAction::OpenRepository => {
+                self.open_search_link(core, SearchLinkTarget::Repository)
+            }
+            NormalKeyAction::CopySearchDetail => self.copy_search_detail(core),
+            NormalKeyAction::OpenSearch => {
+                self.open_search(core);
+                self.nav.message = "search crates".to_owned();
             }
             NormalKeyAction::Noop => {}
         }
@@ -357,11 +373,33 @@ impl WorkspacePage {
             {
                 self.inspect_target_crate(core);
             }
-            Focus::Build => {
-                // TODO(Task 15): run the selected build command (core action)
-            }
+            Focus::Build => match build_items()
+                .get(self.view.selected.build)
+                .map(|item| item.key)
+            {
+                Some("check") => self.run_cargo(core, Focus::Build, &["check"]),
+                Some("build") => self.run_cargo(core, Focus::Build, &["build"]),
+                Some("test") => self.run_cargo(core, Focus::Build, &["test"]),
+                Some("run") => self.run_cargo(core, Focus::Build, &["run"]),
+                Some("release") => self.run_cargo(core, Focus::Build, &["build", "--release"]),
+                Some("clippy") => self.run_cargo(core, Focus::Build, &["clippy", "--all-targets"]),
+                Some("doc") => self.run_cargo(core, Focus::Build, &["doc", "--no-deps"]),
+                Some("update") => self.run_cargo(core, Focus::Build, &["update"]),
+                Some("clean") => self.run_cargo(core, Focus::Build, &["clean"]),
+                Some("timings") => self.run_cargo(core, Focus::Build, &["build", "--timings"]),
+                Some("diagnostics") => self.view.build_tab = BuildCoreTab::LiveOutput,
+                _ => {}
+            },
             Focus::Search => {
-                // TODO(Task 15): search page inspect / input focus
+                if self.nav.input_mode == InputMode::CrateSearch
+                    || core.search.state.results.is_empty()
+                {
+                    core.search.state.expanded = true;
+                    self.nav.input_mode = InputMode::CrateSearch;
+                    self.nav.message = "search crates".to_owned();
+                } else {
+                    self.inspect_selected_crate(core);
+                }
             }
             _ => {}
         }
@@ -489,6 +527,370 @@ impl WorkspacePage {
         ctx.lines.push(format!("killed: {command}"));
         core.processes.command.clear();
         true
+    }
+
+    fn refresh_disk_snapshot(&mut self, core: &mut CoreState) {
+        core.disk_receiver = Some(load_disk_snapshot_async(
+            core.project.clone(),
+            core.config.target_stale_days,
+        ));
+        self.nav.message = "refreshing target analysis".to_owned();
+        self.nav.last_status = "target refresh".to_owned();
+    }
+
+    fn clean_target_stale(&mut self, core: &mut CoreState, dry_run: bool) {
+        let root = Path::new(&core.project.workspace_root);
+        match target_analyzer::clean_stale(root, dry_run, core.config.target_stale_days) {
+            Ok(report) => {
+                let output = std::iter::once(if dry_run {
+                    "Target clean dry-run".to_owned()
+                } else {
+                    "Target clean stale".to_owned()
+                })
+                .chain(std::iter::once(format!(
+                    "threshold: {} days, artifacts: {}, total: {}",
+                    core.config.target_stale_days,
+                    report.artifact_count,
+                    format_bytes(report.total_size)
+                )))
+                .chain(std::iter::once(String::new()))
+                .chain(report.lines.clone())
+                .collect();
+                core.set_slot_lines(OutputSlot::WorkspaceTarget, output);
+                self.view.ws_tab = WorkspaceTab::Target;
+                self.nav.current_focus = FocusPanel::Workspace;
+                self.set_focus(Focus::Output);
+                self.nav.message = if dry_run {
+                    format!("dry-run: {} stale artifacts", report.artifact_count)
+                } else {
+                    format!("cleaned: {} stale artifacts", report.artifact_count)
+                };
+                self.nav.last_status = "target clean".to_owned();
+                if !dry_run {
+                    self.refresh_disk_snapshot(core);
+                }
+            }
+            Err(error) => {
+                self.nav.message = format!("target clean failed: {error}");
+                self.nav.last_status = "target clean failed".to_owned();
+            }
+        }
+    }
+
+    fn build_cargo_command(&self, core: &CoreState, args: &[&str]) -> CommandSpec {
+        let Some(kind) = self.cargo_task_kind(args) else {
+            return CommandSpec {
+                program: "cargo".into(),
+                args: self
+                    .scoped_args(core, args)
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            };
+        };
+        let mut task = CargoTask {
+            kind,
+            scope: self.cargo_task_scope(core, args),
+            features: FeatureSelection::default(),
+            profile: if args.contains(&"--release") {
+                Profile::Release
+            } else {
+                Profile::Dev
+            },
+            target: None,
+            extra_args: Vec::new(),
+        };
+        if args == ["doc", "--no-deps"] {
+            task.extra_args.push("--no-deps".to_owned());
+        }
+        if args == ["build", "--timings"] {
+            task.extra_args.push("--timings".to_owned());
+        }
+        task.to_command()
+    }
+
+    fn cargo_task_kind(&self, args: &[&str]) -> Option<CargoTaskKind> {
+        match args.first().copied()? {
+            "check" => Some(CargoTaskKind::Check),
+            "build" => Some(CargoTaskKind::Build),
+            "run" => Some(CargoTaskKind::Run {
+                bin: None,
+                args: Vec::new(),
+            }),
+            "test" => Some(CargoTaskKind::Test {
+                filter: None,
+                nocapture: false,
+            }),
+            "clippy" => Some(CargoTaskKind::Clippy),
+            "doc" => Some(CargoTaskKind::Doc),
+            "update" => Some(CargoTaskKind::Update { package: None }),
+            _ => None,
+        }
+    }
+
+    fn cargo_task_scope(&self, core: &CoreState, args: &[&str]) -> TaskScope {
+        let command = args.first().copied().unwrap_or_default();
+        if matches!(command, "run" | "update") {
+            return self
+                .selected_package(core)
+                .map(TaskScope::Package)
+                .unwrap_or(TaskScope::CurrentPackage);
+        }
+        self.selected_package(core)
+            .map(TaskScope::Package)
+            .unwrap_or(TaskScope::Workspace)
+    }
+
+    fn scoped_args(&self, core: &CoreState, args: &[&str]) -> Vec<String> {
+        let mut result = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let Some(command) = result.first().map(String::as_str) else {
+            return result;
+        };
+
+        if matches!(command, "init" | "new") {
+            return result;
+        }
+
+        if matches!(command, "run" | "update" | "clean") {
+            if let Some(package) = self.selected_package(core) {
+                result.push("-p".to_owned());
+                result.push(package);
+            }
+            return result;
+        }
+
+        match self.selected_package(core) {
+            Some(package) => {
+                result.push("-p".to_owned());
+                result.push(package);
+            }
+            None => result.push("--workspace".to_owned()),
+        }
+
+        result
+    }
+
+    fn selected_package(&self, core: &CoreState) -> Option<String> {
+        if self.view.selected.workspace == 0 {
+            None
+        } else {
+            core.project
+                .packages
+                .get(self.view.selected.workspace.saturating_sub(1))
+                .cloned()
+        }
+    }
+
+    fn run_cargo(&mut self, core: &mut CoreState, detail_focus: Focus, args: &[&str]) {
+        if core.processes.child.is_some() {
+            self.nav.message = format!("already running: {}", core.processes.command);
+            return;
+        }
+
+        let spec = self.build_cargo_command(core, args);
+        let command = spec.display();
+        let slot = match detail_focus {
+            Focus::Build => OutputSlot::BuildLive,
+            Focus::Dependencies => OutputSlot::DepsTree,
+            Focus::Search => OutputSlot::SearchDetail,
+            _ => self.active_output_slot(core),
+        };
+        self.nav.command_preview = command.clone();
+        self.nav.message = format!("running: {command}");
+        self.set_focus(detail_focus);
+        if detail_focus == Focus::Build {
+            self.view.build_tab = BuildCoreTab::LiveOutput;
+        } else if detail_focus == Focus::Dependencies {
+            self.view.deps_tab = DependenciesTab::DependencyTree;
+        }
+
+        match core.spawn_command(&spec, slot) {
+            Ok(()) => {}
+            Err(_) => {
+                self.nav.last_status = "error".to_owned();
+                self.nav.message = format!("failed: {}", spec.display());
+            }
+        }
+    }
+
+    fn run_tree(&mut self, core: &mut CoreState, allow_fetch: bool) {
+        if allow_fetch {
+            self.run_cargo(core, Focus::Dependencies, &["tree", "-e", "features"]);
+        } else {
+            self.run_cargo(
+                core,
+                Focus::Dependencies,
+                &["tree", "--offline", "-e", "features"],
+            );
+        }
+        self.view.deps_tab = DependenciesTab::DependencyTree;
+    }
+
+    fn run_inverse_tree(&mut self, core: &mut CoreState, allow_fetch: bool) {
+        let Some(dependency) = selected_dependency_name(
+            &core.project,
+            self.view.selected.workspace,
+            self.view.selected.dependency,
+        ) else {
+            core.set_slot_lines(
+                OutputSlot::DepsFeatures,
+                vec!["select a dependency first".to_owned()],
+            );
+            return;
+        };
+
+        if allow_fetch {
+            self.run_cargo(
+                core,
+                Focus::Dependencies,
+                &["tree", "-e", "features", "-i", &dependency],
+            );
+        } else {
+            self.run_cargo(
+                core,
+                Focus::Dependencies,
+                &["tree", "--offline", "-e", "features", "-i", &dependency],
+            );
+        }
+        self.view.deps_tab = DependenciesTab::DependencyTree;
+    }
+
+    /// tree 命令的产出解析。运行时触发点目前在 App::finish_cargo_output（App 的副本），
+    /// 该页面副本供 15b 迁移 run loop 后由页面触发。
+    #[allow(dead_code)]
+    fn update_dependency_tree_from_output(&mut self, core: &mut CoreState) {
+        let lines = core.slot_lines(OutputSlot::DepsTree);
+        let nodes = dep_tree::parse_tree_output(&lines, &self.view.tree_expanded);
+        if nodes.is_empty() {
+            core.context(OutputSlot::DepsTree).lines.insert(
+                0,
+                "structured tree parse unavailable; showing raw cargo tree output".to_owned(),
+            );
+            return;
+        }
+        let visible_len = dep_tree::flatten_visible(&nodes).len();
+        self.view.selected.tree = self
+            .view
+            .selected
+            .tree
+            .min(visible_len.saturating_sub(1));
+        let selected = self.view.selected.tree;
+        let ctx = core.context(OutputSlot::DepsTree);
+        ctx.tree_nodes = nodes;
+        dep_tree::apply_selected(&mut ctx.tree_nodes, selected);
+    }
+
+    fn preview_add(&mut self, core: &mut CoreState) {
+        let selected_name = core
+            .search
+            .state
+            .selected_result()
+            .map(|result| result.name.as_str())
+            .or_else(|| {
+                let query = core.search.state.query.trim();
+                (!query.is_empty()).then_some(query)
+            })
+            .unwrap_or("<crate>");
+        let command = match self.selected_package(core) {
+            Some(package) => format!("cargo add {selected_name} -p {package}"),
+            None => format!("cargo add {selected_name}"),
+        };
+        self.preview(&command);
+        let detail = core
+            .search
+            .state
+            .selected_detail()
+            .into_iter()
+            .chain(vec![String::new(), command])
+            .collect();
+        core.set_slot_lines(OutputSlot::SearchDetail, detail);
+    }
+
+    fn open_search(&mut self, core: &mut CoreState) {
+        if self.nav.focus != Focus::Search {
+            self.view.search_return_focus = self.nav.focus;
+        }
+        self.set_focus(Focus::Search);
+        core.search.state.expanded = true;
+        self.reset_slot_scroll(core, OutputSlot::SearchDetail);
+        self.nav.input_mode = InputMode::CrateSearch;
+    }
+
+    fn inspect_selected_crate(&mut self, core: &mut CoreState) {
+        if core.search_receiver.is_some() {
+            self.nav.message = "search task already running".to_owned();
+            return;
+        }
+        let Some(result) = core.search.state.selected_result().cloned() else {
+            core.set_slot_lines(
+                OutputSlot::SearchDetail,
+                vec!["no crate selected".to_owned()],
+            );
+            return;
+        };
+
+        let command = format!("cargo info {}", result.name);
+        self.nav.command_preview = command.clone();
+        self.nav.message = format!("inspecting crate: {}", result.name);
+        core.search.state.expanded = true;
+        let detail = info_progress_detail(&result.name, Duration::from_secs(0));
+        core.search
+            .state
+            .set_selected_detail(result.name.clone(), detail.clone());
+        core.set_slot_lines(OutputSlot::SearchDetail, detail);
+        let (tx, rx) = mpsc::channel();
+        core.search_receiver = Some(rx);
+        core.search_started = Some(Instant::now());
+        let config = self.search_job_config(core);
+        thread::spawn(move || {
+            let _ = tx.send(run_info_job(result, config));
+        });
+    }
+
+    fn search_job_config(&self, core: &CoreState) -> SearchJobConfig {
+        SearchJobConfig {
+            limit: core.config.search_limit,
+            network_timeout: core.config.network_timeout(),
+            info_timeout: core.config.cargo_info_timeout(),
+        }
+    }
+
+    fn open_search_link(&mut self, core: &CoreState, target: SearchLinkTarget) {
+        let url = core.search.state.url_for(target);
+
+        let Some(url) = url else {
+            self.nav.message = SearchState::unavailable_message(target).to_owned();
+            return;
+        };
+
+        match open_url(&url) {
+            Ok(()) => self.open_url_message_success(&url),
+            Err(error) => self.open_url_message_error(error),
+        }
+    }
+
+    fn open_url_message_success(&mut self, url: &str) {
+        self.nav.message = format!("opened: {url}");
+        self.nav.last_status = "opened link".to_owned();
+    }
+
+    fn open_url_message_error(&mut self, error: io::Error) {
+        self.nav.message = format!("failed to open link: {error}");
+        self.nav.last_status = "open link failed".to_owned();
+    }
+
+    fn copy_search_detail(&mut self, core: &CoreState) {
+        let text = core.search.state.selected_detail().join("\n");
+        match copy_to_clipboard(&text) {
+            Ok(()) => {
+                self.nav.message = "copied search detail".to_owned();
+                self.nav.last_status = "copied".to_owned();
+            }
+            Err(error) => {
+                self.nav.message = format!("copy failed: {error}");
+                self.nav.last_status = "copy failed".to_owned();
+            }
+        }
     }
 
     fn active_output_slot(&self, core: &CoreState) -> OutputSlot {
@@ -772,4 +1174,17 @@ impl Page for WorkspacePage {
     fn title(&self) -> &'static str {
         "[1]-Workspace"
     }
+}
+
+fn load_disk_snapshot_async(project: ProjectInfo, stale_days: u64) -> Receiver<DiskSnapshot> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let root = Path::new(&project.workspace_root);
+        let _ = tx.send(target_analyzer::analyze_target(
+            root,
+            &project.packages,
+            stale_days,
+        ));
+    });
+    rx
 }
