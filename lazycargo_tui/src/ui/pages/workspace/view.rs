@@ -2,47 +2,53 @@ use std::collections::BTreeSet;
 
 use crate::core::build_history::format_duration_ms;
 use crate::core::dep_tree;
-use crate::core::model::OutputSlot;
+use crate::core::model::{CoreState, OutputSlot};
 use crate::core::project::{DependencyInfo, PackageInfo, ProjectInfo};
 use crate::core::util::{format_bytes, progress_bar};
-
-use super::{App, BuildCoreTab, DependenciesTab, FocusPanel, HistoryEntry, WorkspaceTab};
+use crate::state::NavigationState;
+use crate::ui::controller::{BuildCoreTab, DependenciesTab, FocusPanel, WorkspaceTab, WorkspaceView};
+use crate::ui::HistoryEntry;
 
 #[derive(Clone)]
-pub(super) struct CommandItem {
-    pub(super) key: &'static str,
-    pub(super) label: String,
+pub(crate) struct CommandItem {
+    pub(crate) key: &'static str,
+    pub(crate) label: String,
     detail: String,
 }
 
-pub(super) fn output_lines(app: &App) -> Vec<String> {
-    match app.navigation.current_focus {
-        FocusPanel::Workspace => match app.navigation.ws_tab {
-            WorkspaceTab::CrateInfo => workspace_detail_lines(app),
-            WorkspaceTab::Metrics => workspace_metrics_lines(app),
-            WorkspaceTab::Target => target_analysis_lines(app),
+pub(crate) fn output_lines(
+    core: &CoreState,
+    view: &WorkspaceView,
+    nav: &NavigationState,
+    history: &[HistoryEntry],
+) -> Vec<String> {
+    match nav.current_focus {
+        FocusPanel::Workspace => match view.ws_tab {
+            WorkspaceTab::CrateInfo => workspace_detail_lines(core, view),
+            WorkspaceTab::Metrics => workspace_metrics_lines(core, view, history, &nav.last_status),
+            WorkspaceTab::Target => target_analysis_lines(core, view),
         },
-        FocusPanel::BuildCore => match app.navigation.build_tab {
-            BuildCoreTab::TaskConfig => build_detail_lines(app),
-            BuildCoreTab::LiveOutput => app.core.slot_lines(OutputSlot::BuildLive),
+        FocusPanel::BuildCore => match view.build_tab {
+            BuildCoreTab::TaskConfig => build_detail_lines(core, view),
+            BuildCoreTab::LiveOutput => core.slot_lines(OutputSlot::BuildLive),
         },
-        FocusPanel::Dependencies => match app.navigation.deps_tab {
-            DependenciesTab::Features => dependency_detail_lines(app),
+        FocusPanel::Dependencies => match view.deps_tab {
+            DependenciesTab::Features => dependency_detail_lines(core, view),
             DependenciesTab::DependencyTree
-                if app
-                    .core.output
+                if core
+                    .output
                     .get(&OutputSlot::DepsTree)
                     .map(|ctx| ctx.tree_nodes.is_empty())
                     .unwrap_or(true) =>
             {
-                app.core.slot_lines(OutputSlot::DepsTree)
+                core.slot_lines(OutputSlot::DepsTree)
             }
-            DependenciesTab::DependencyTree => dependency_tree_lines(app),
+            DependenciesTab::DependencyTree => dependency_tree_lines(core, view),
         },
     }
 }
 
-pub(super) fn workspace_items(project: &ProjectInfo) -> Vec<String> {
+pub(crate) fn workspace_items(project: &ProjectInfo) -> Vec<String> {
     let mut items = vec!["workspace".to_owned()];
     items.extend(
         project
@@ -53,7 +59,7 @@ pub(super) fn workspace_items(project: &ProjectInfo) -> Vec<String> {
     items
 }
 
-pub(super) fn dependency_items_for(
+pub(crate) fn dependency_items_for(
     project: &ProjectInfo,
     workspace_selected: usize,
 ) -> Vec<String> {
@@ -86,7 +92,7 @@ pub(super) fn dependency_items_for(
         .collect()
 }
 
-pub(super) fn build_items() -> Vec<CommandItem> {
+pub(crate) fn build_items() -> Vec<CommandItem> {
     vec![
         CommandItem {
             key: "check",
@@ -146,30 +152,33 @@ pub(super) fn build_items() -> Vec<CommandItem> {
     ]
 }
 
-fn workspace_detail_lines(app: &App) -> Vec<String> {
-    let package = selected_package(&app.core.project, app.selection.workspace_selected);
+fn workspace_detail_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
+    let package = selected_package(&core.project, view.selected.workspace);
     let package_name = package
         .map(|package| package.name.as_str())
-        .unwrap_or(app.core.project.name.as_str());
+        .unwrap_or(core.project.name.as_str());
     let package_version = package
         .map(|package| package.version.as_str())
-        .unwrap_or(app.core.project.version.as_str());
+        .unwrap_or(core.project.version.as_str());
     let manifest_path = package
         .map(|package| package.manifest_path.as_str())
-        .unwrap_or(app.core.project.manifest_path.as_str());
+        .unwrap_or(core.project.manifest_path.as_str());
 
     let mut lines = vec![
-        format!("scope: {}", app.selected_scope_label()),
+        format!(
+            "scope: {}",
+            scope_label(&core.project, view.selected.workspace)
+        ),
         String::new(),
         "Health snapshot".to_owned(),
-        format!("  rustc: {}", app.core.project.rustc_version),
+        format!("  rustc: {}", core.project.rustc_version),
         format!(
             "  msrv: {}",
             package
                 .and_then(|package| package.rust_version.as_deref())
                 .unwrap_or("<not declared>")
         ),
-        format!("  target total: {}", app.core.disk.total_label),
+        format!("  target total: {}", core.disk.total_label),
         String::new(),
         "Package identity".to_owned(),
         format!("  name: {package_name}"),
@@ -179,17 +188,17 @@ fn workspace_detail_lines(app: &App) -> Vec<String> {
         "Disk tracking".to_owned(),
         format!(
             "  source size: {}",
-            package_source_size_label(app, package_name)
+            package_source_size_label(core, package_name)
         ),
-        format!("  target total: {}", app.core.disk.total_label),
+        format!("  target total: {}", core.disk.total_label),
         format!(
             "  crate cache estimate: {}",
-            package_target_cache_label(app, package_name)
+            package_target_cache_label(core, package_name)
         ),
         String::new(),
         "Targets".to_owned(),
     ];
-    lines.extend(package_targets(package, &app.core.project));
+    lines.extend(package_targets(package, &core.project));
     lines.extend([
         String::new(),
         "Effect".to_owned(),
@@ -200,8 +209,7 @@ fn workspace_detail_lines(app: &App) -> Vec<String> {
         "Members".to_owned(),
     ]);
     lines.extend(
-        app.core
-            .project
+        core.project
             .packages
             .iter()
             .map(|package| format!("  {package}")),
@@ -209,29 +217,35 @@ fn workspace_detail_lines(app: &App) -> Vec<String> {
     lines
 }
 
-fn build_detail_lines(app: &App) -> Vec<String> {
+fn build_detail_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
     vec![
-        selected_item_detail(&build_items(), app.selection.build_selected),
-        format!("scope: {}", app.selected_scope_label()),
+        selected_item_detail(&build_items(), view.selected.build),
+        format!(
+            "scope: {}",
+            scope_label(&core.project, view.selected.workspace)
+        ),
         String::new(),
         "Last build output".to_owned(),
     ]
     .into_iter()
-    .chain(app.core.slot_lines(OutputSlot::BuildConfig))
+    .chain(core.slot_lines(OutputSlot::BuildConfig))
     .collect()
 }
 
-fn dependency_detail_lines(app: &App) -> Vec<String> {
-    let dependency = selected_dependency(app);
+fn dependency_detail_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
+    let dependency = selected_dependency(core, view);
     let mut lines = vec![
-        selected_dependency_detail(app, dependency),
-        format!("scope: {}", app.selected_scope_label()),
+        selected_dependency_detail(dependency),
+        format!(
+            "scope: {}",
+            scope_label(&core.project, view.selected.workspace)
+        ),
         String::new(),
         "Feature state".to_owned(),
     ];
-    lines.extend(feature_state_lines(app, dependency));
+    lines.extend(feature_state_lines(core, dependency));
     lines.extend([String::new(), "Local path".to_owned()]);
-    lines.extend(dependency_path_lines(app, dependency));
+    lines.extend(dependency_path_lines(core, view, dependency));
     lines.extend([
         String::new(),
         "Actions".to_owned(),
@@ -241,26 +255,33 @@ fn dependency_detail_lines(app: &App) -> Vec<String> {
         "  T/I: allow Cargo to fetch missing registry packages".to_owned(),
         "  a: preview cargo add".to_owned(),
     ]);
-    lines.extend(app.core.slot_lines(OutputSlot::DepsFeatures));
+    lines.extend(core.slot_lines(OutputSlot::DepsFeatures));
     lines
 }
 
-fn workspace_metrics_lines(app: &App) -> Vec<String> {
+fn workspace_metrics_lines(
+    core: &CoreState,
+    view: &WorkspaceView,
+    history: &[HistoryEntry],
+    last_status: &str,
+) -> Vec<String> {
     let mut lines = vec![
-        format!("last status: {}", app.navigation.last_status),
-        format!("scope: {}", app.selected_scope_label()),
-        format!("targets: {}", app.core.project.targets.len()),
-        format!("dependencies: {}", app.core.project.dependencies.len()),
-        format!("diagnostics: {}", app.core.diagnostics.len()),
-        format!("history entries: {}", app.history.len()),
-        format!("target dir size: {}", app.core.disk.total_label),
+        format!("last status: {last_status}"),
+        format!(
+            "scope: {}",
+            scope_label(&core.project, view.selected.workspace)
+        ),
+        format!("targets: {}", core.project.targets.len()),
+        format!("dependencies: {}", core.project.dependencies.len()),
+        format!("diagnostics: {}", core.diagnostics.len()),
+        format!("history entries: {}", history.len()),
+        format!("target dir size: {}", core.disk.total_label),
         String::new(),
         "Build Metrics".to_owned(),
         "Last 10 builds".to_owned(),
     ];
     lines.extend(
-        app.core
-            .history
+        core.history
             .entries
             .iter()
             .take(10)
@@ -275,13 +296,12 @@ fn workspace_metrics_lines(app: &App) -> Vec<String> {
                 )
             }),
     );
-    if app.core.history.entries.is_empty() {
+    if core.history.entries.is_empty() {
         lines.push("  no build history yet".to_owned());
     }
     lines.extend([String::new(), "Recent averages".to_owned()]);
     lines.extend(
-        app.core
-            .history
+        core.history
             .daily_stats(1)
             .into_iter()
             .map(|stats| {
@@ -294,7 +314,7 @@ fn workspace_metrics_lines(app: &App) -> Vec<String> {
             }),
     );
     lines.extend([String::new(), "Slowest crates today".to_owned()]);
-    let slowest = app.core.history.slowest_crates(10);
+    let slowest = core.history.slowest_crates(10);
     if slowest.is_empty() {
         lines.push("  <run cargo build --timings to populate>".to_owned());
     } else {
@@ -308,22 +328,21 @@ fn workspace_metrics_lines(app: &App) -> Vec<String> {
     }
     lines.extend([String::new(), "Package disk snapshot".to_owned()]);
     lines.extend(
-        app.core
-            .project
+        core.project
             .workspace_packages
             .iter()
             .map(|package| {
                 format!(
                     "  {} source={} cache={}",
                     package.name,
-                    package_source_size_label(app, &package.name),
-                    package_target_cache_label(app, &package.name)
+                    package_source_size_label(core, &package.name),
+                    package_target_cache_label(core, &package.name)
                 )
             }),
     );
     lines.extend([String::new(), "Recent command timings".to_owned()]);
     lines.extend(
-        history_lines(&app.history)
+        history_lines(history)
             .into_iter()
             .take(10)
             .map(|line| format!("  {line}")),
@@ -331,33 +350,30 @@ fn workspace_metrics_lines(app: &App) -> Vec<String> {
     lines
 }
 
-fn target_analysis_lines(app: &App) -> Vec<String> {
-    let selected = app
-        .selection
-        .target_crate_selected
-        .min(app.core.disk.by_crate.len().saturating_sub(1));
+fn target_analysis_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
+    let selected = view
+        .selected
+        .target_crate
+        .min(core.disk.by_crate.len().saturating_sub(1));
     let mut lines = vec![
         format!(
             "Total: {}  |  Stale: {} ({}d+)",
-            app.core.disk.total_label,
-            app.core.disk.stale_label,
-            app.core.config.target_stale_days
+            core.disk.total_label,
+            core.disk.stale_label,
+            core.config.target_stale_days
         ),
-        format!(
-            "Disk pressure: {}",
-            disk_pressure_bar(app.core.disk.total_size)
-        ),
+        format!("Disk pressure: {}", disk_pressure_bar(core.disk.total_size)),
         format!(
             "Last updated: {:.1}s ago",
-            app.core.disk.last_updated.elapsed().as_secs_f32()
+            core.disk.last_updated.elapsed().as_secs_f32()
         ),
         String::new(),
         "By Profile".to_owned(),
     ];
-    if app.core.disk.by_profile.is_empty() {
+    if core.disk.by_profile.is_empty() {
         lines.push("  <target directory not built yet>".to_owned());
     } else {
-        lines.extend(app.core.disk.by_profile.iter().map(|profile| {
+        lines.extend(core.disk.by_profile.iter().map(|profile| {
             format!(
                 "  {:<12} {:>10} {:>7} files  last {}",
                 profile.profile,
@@ -369,17 +385,16 @@ fn target_analysis_lines(app: &App) -> Vec<String> {
     }
     lines.extend([
         String::new(),
-        format!("Top {} Crates", app.core.config.target_top_crates),
+        format!("Top {} Crates", core.config.target_top_crates),
     ]);
-    if app.core.disk.by_crate.is_empty() {
+    if core.disk.by_crate.is_empty() {
         lines.push("  <no attributable crate artifacts>".to_owned());
     } else {
         lines.extend(
-            app.core
-                .disk
+            core.disk
                 .by_crate
                 .iter()
-                .take(app.core.config.target_top_crates)
+                .take(core.config.target_top_crates)
                 .enumerate()
                 .map(|(index, item)| {
                     let local = if item.is_local { "local" } else { "dep" };
@@ -392,7 +407,7 @@ fn target_analysis_lines(app: &App) -> Vec<String> {
         );
     }
     lines.extend([String::new(), "Selected crate".to_owned()]);
-    if let Some(item) = app.core.disk.by_crate.get(selected) {
+    if let Some(item) = core.disk.by_crate.get(selected) {
         lines.extend([
             format!("  name: {}", item.name),
             format!("  size: {}", item.label),
@@ -418,7 +433,7 @@ fn target_analysis_lines(app: &App) -> Vec<String> {
         "  d: dry-run stale clean".to_owned(),
         format!(
             "  c: clean stale .rmeta/.rlib files older than {} days",
-            app.core.config.target_stale_days
+            core.config.target_stale_days
         ),
     ]);
     lines
@@ -436,18 +451,18 @@ fn disk_pressure_bar(size: u64) -> String {
     )
 }
 
-fn dependency_tree_lines(app: &App) -> Vec<String> {
-    let tree_nodes = app
-        .core.output
+fn dependency_tree_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> {
+    let tree_nodes = core
+        .output
         .get(&OutputSlot::DepsTree)
         .map(|ctx| ctx.tree_nodes.as_slice())
         .unwrap_or(&[]);
     let visible = dep_tree::flatten_visible(tree_nodes);
-    let selected = visible.get(app.selection.tree_selected);
+    let selected = visible.get(view.selected.tree);
     let mut lines = Vec::new();
     lines.extend(dep_tree::render_tree_lines(
         tree_nodes,
-        app.selection.tree_selected,
+        view.selected.tree,
     ));
     lines.extend([String::new(), "Selected detail".to_owned()]);
     lines.extend(dep_tree::node_detail(selected));
@@ -472,14 +487,17 @@ fn history_lines(history: &[HistoryEntry]) -> Vec<String> {
         .collect()
 }
 
-fn selected_dependency(app: &App) -> Option<&DependencyInfo> {
-    selected_package(&app.core.project, app.selection.workspace_selected)
+fn selected_dependency<'a>(
+    core: &'a CoreState,
+    view: &WorkspaceView,
+) -> Option<&'a DependencyInfo> {
+    selected_package(&core.project, view.selected.workspace)
         .map(|package| package.dependencies.as_slice())
-        .unwrap_or(app.core.project.dependencies.as_slice())
-        .get(app.selection.dependency_selected)
+        .unwrap_or(core.project.dependencies.as_slice())
+        .get(view.selected.dependency)
 }
 
-fn selected_dependency_detail(_app: &App, dependency: Option<&DependencyInfo>) -> String {
+fn selected_dependency_detail(dependency: Option<&DependencyInfo>) -> String {
     dependency
         .map(|dependency| {
             let features = if dependency.features.is_empty() {
@@ -536,36 +554,35 @@ fn package_targets(package: Option<&PackageInfo>, project: &ProjectInfo) -> Vec<
         .collect()
 }
 
-fn package_source_size_label(app: &App, package_name: &str) -> String {
-    let manifest = app.core
+fn package_source_size_label(core: &CoreState, package_name: &str) -> String {
+    let manifest = core
         .project
         .workspace_packages
         .iter()
         .find(|package| package.name == package_name)
         .map(|package| package.manifest_path.as_str())
-        .unwrap_or(app.core.project.manifest_path.as_str());
+        .unwrap_or(core.project.manifest_path.as_str());
     let Some(root) = std::path::Path::new(manifest).parent() else {
         return "<unknown>".to_owned();
     };
-    super::dir_size(&root.join("src"))
-        .map(super::format_bytes)
+    crate::ui::dir_size(&root.join("src"))
+        .map(format_bytes)
         .unwrap_or_else(|_| "<unknown>".to_owned())
 }
 
-fn package_target_cache_label(app: &App, package_name: &str) -> String {
-    app.core
-        .disk
+fn package_target_cache_label(core: &CoreState, package_name: &str) -> String {
+    core.disk
         .package(package_name)
         .map(|package| package.target_cache.clone())
         .unwrap_or_else(|| "<unknown>".to_owned())
 }
 
-fn feature_state_lines(app: &App, dependency: Option<&DependencyInfo>) -> Vec<String> {
+fn feature_state_lines(core: &CoreState, dependency: Option<&DependencyInfo>) -> Vec<String> {
     let Some(dependency) = dependency else {
         return vec!["  <select a dependency>".to_owned()];
     };
     let explicit = dependency.features.iter().cloned().collect::<BTreeSet<_>>();
-    let package_features = app.core
+    let package_features = core
         .project
         .dependency_packages
         .iter()
@@ -611,15 +628,31 @@ fn feature_state_lines(app: &App, dependency: Option<&DependencyInfo>) -> Vec<St
     lines
 }
 
-fn dependency_path_lines(app: &App, dependency: Option<&DependencyInfo>) -> Vec<String> {
+fn dependency_path_lines(
+    core: &CoreState,
+    view: &WorkspaceView,
+    dependency: Option<&DependencyInfo>,
+) -> Vec<String> {
     let Some(dependency) = dependency else {
         return vec!["  <select a dependency>".to_owned()];
     };
-    let package_name = selected_package(&app.core.project, app.selection.workspace_selected)
+    let package_name = selected_package(&core.project, view.selected.workspace)
         .map(|package| package.name.as_str())
-        .unwrap_or(app.core.project.name.as_str());
+        .unwrap_or(core.project.name.as_str());
     vec![
         format!("  {package_name} -> {}", dependency.name),
         "  press i for cargo tree -i <dependency>".to_owned(),
     ]
+}
+
+fn scope_label(project: &ProjectInfo, workspace_selected: usize) -> String {
+    if workspace_selected == 0 {
+        "workspace".to_owned()
+    } else {
+        project
+            .packages
+            .get(workspace_selected.saturating_sub(1))
+            .map(|package| format!("package {package}"))
+            .unwrap_or_else(|| "workspace".to_owned())
+    }
 }

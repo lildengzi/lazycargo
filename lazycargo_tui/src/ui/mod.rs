@@ -50,7 +50,6 @@ mod pages;
 
 use controller::*;
 
-mod dashboard;
 mod terminal_support;
 
 use components::{
@@ -62,13 +61,13 @@ use components::{
     search_input::render_search_input,
     style::{output_line_to_lines, panel_block, semantic_output_line},
 };
-use dashboard::{build_items, dependency_items_for, output_lines, workspace_items};
+use pages::workspace::view::{build_items, dependency_items_for, output_lines, workspace_items};
 use terminal_support::{copy_to_clipboard, first_url, open_url};
 
-struct HistoryEntry {
-    command: String,
-    success: bool,
-    duration: Duration,
+pub(crate) struct HistoryEntry {
+    pub(crate) command: String,
+    pub(crate) success: bool,
+    pub(crate) duration: Duration,
 }
 
 struct App {
@@ -136,6 +135,23 @@ impl App {
                 tree_expanded: HashMap::new(),
             },
             history: Vec::new(),
+        }
+    }
+
+    fn view_state(&self) -> WorkspaceView {
+        WorkspaceView {
+            ws_tab: self.navigation.ws_tab,
+            build_tab: self.navigation.build_tab,
+            deps_tab: self.navigation.deps_tab,
+            selected: SelectedIndex {
+                workspace: self.selection.workspace_selected,
+                dependency: self.selection.dependency_selected,
+                build: self.selection.build_selected,
+                target_crate: self.selection.target_crate_selected,
+                tree: self.selection.tree_selected,
+            },
+            tree_expanded: self.selection.tree_expanded.clone(),
+            search_return_focus: self.navigation.search_return_focus,
         }
     }
 
@@ -505,7 +521,8 @@ impl App {
     fn scroll_right(&mut self, delta: isize) {
         self.set_focus(Focus::Output);
         let slot = self.active_output_slot();
-        let content_len = output_lines(self).len();
+        let content_len =
+            output_lines(&self.core, &self.view_state(), &self.navigation, &self.history).len();
         let scroll = {
             let ctx = self.core.context(slot);
             let visible_rows = ctx.visible_rows.max(1);
@@ -1838,7 +1855,7 @@ fn render_search_page(
 
 fn render_output(frame: &mut Frame<'_>, app: &mut App, area: Rect, mouse_state: &mut MouseState) {
     let visible_rows = area.height.saturating_sub(2) as usize;
-    let lines = output_lines(app);
+    let lines = output_lines(&app.core, &app.view_state(), &app.navigation, &app.history);
     let slot = app.active_output_slot();
     let max_scroll = lines.len().saturating_sub(visible_rows);
     let offset = {
@@ -2048,7 +2065,7 @@ fn load_disk_snapshot_async(project: ProjectInfo, stale_days: u64) -> Receiver<D
     rx
 }
 
-fn dir_size(path: &std::path::Path) -> io::Result<u64> {
+pub(crate) fn dir_size(path: &std::path::Path) -> io::Result<u64> {
     let mut total = 0;
     if !path.exists() {
         return Ok(0);
