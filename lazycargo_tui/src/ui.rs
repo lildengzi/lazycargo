@@ -28,6 +28,7 @@ use crate::cargo_task::{
     CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
 };
 use crate::config::AppConfig;
+use crate::core::process::{extract_diagnostics, spawn_streaming};
 use crate::dep_tree;
 use crate::keymap::{
     self, NormalKeyAction, NormalKeyContext, ProjectNewConfirmAction, TextInputAction,
@@ -43,7 +44,6 @@ use lazycargo_search::{SearchLinkTarget, SearchState};
 
 mod dashboard;
 mod layout;
-pub(crate) mod runner;
 mod search_job;
 mod style;
 mod terminal_support;
@@ -53,7 +53,6 @@ use layout::{
     render_command_log, render_menu, render_panel, render_project_new_confirm, render_scrollbar,
     render_search_input,
 };
-use runner::{extract_diagnostics, spawn_streaming};
 use search_job::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
     SearchJobKind, SearchJobResult,

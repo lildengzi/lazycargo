@@ -9,7 +9,7 @@ use crate::build_history::BuildHistory;
 use crate::dep_tree::DepNode;
 use crate::metadata::ProjectInfo;
 use crate::target_analyzer::DiskSnapshot;
-use crate::ui::runner::OutputLine;
+use crate::core::process::OutputLine;
 use crate::ui::{BuildCoreTab, DependenciesTab, Focus, FocusPanel, InputMode, WorkspaceTab};
 
 pub(crate) struct WorkspaceModel {

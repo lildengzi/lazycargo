@@ -5,9 +5,8 @@ use lazycargo_search::{
     search_error_detail, search_timeout_detail, CrateInfoReport, CrateSearchResult,
 };
 
+use crate::core::process::{run_captured, split_output};
 use crate::util::{animated_progress_bar, progress_bar};
-
-use super::runner::{command_output_with_timeout, split_output};
 
 #[derive(Debug, Clone)]
 pub(super) struct SearchJobConfig {
@@ -63,7 +62,7 @@ pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJo
     let limit = config.limit.clamp(1, 100).to_string();
     let command = format!("cargo search {query} --limit {limit}");
     let started = Instant::now();
-    let output = command_output_with_timeout(
+    let output = run_captured(
         "cargo",
         &["search", &query, "--limit", &limit],
         config.network_timeout,
@@ -130,7 +129,7 @@ pub(super) fn run_search_job(query: String, config: SearchJobConfig) -> SearchJo
 pub(super) fn run_info_job(result: CrateSearchResult, config: SearchJobConfig) -> SearchJobResult {
     let command = format!("cargo info {}", result.name);
     let started = Instant::now();
-    let output = command_output_with_timeout("cargo", &["info", &result.name], config.info_timeout);
+    let output = run_captured("cargo", &["info", &result.name], config.info_timeout);
     let duration = started.elapsed();
 
     match output {
