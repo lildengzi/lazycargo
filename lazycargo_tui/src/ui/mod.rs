@@ -2157,7 +2157,9 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::core::project::{DependencyInfo, DependencyKind, PackageInfo, TargetInfo};
+    use crate::ui::pages::search::controller::SearchPage;
     use crate::ui::pages::workspace::controller::WorkspacePage;
+    use lazycargo_search::CrateSearchResult;
 
     fn sample_project() -> ProjectInfo {
         let dir = tempfile::tempdir().unwrap();
@@ -2216,6 +2218,22 @@ mod tests {
         page
     }
 
+    fn search_page_from_app(app: &App) -> SearchPage {
+        let mut page = SearchPage::new();
+        page.nav.focus = app.navigation.focus;
+        page.nav.input_mode = app.navigation.input_mode;
+        page.nav.filter = app.navigation.filter.clone();
+        page.nav.message = app.navigation.message.clone();
+        page.nav.last_status = app.navigation.last_status.clone();
+        page.nav.copy_mode = app.navigation.copy_mode;
+        page.nav.command_preview = app.navigation.command_preview.clone();
+        page.nav.search_return_focus = app.navigation.search_return_focus;
+        page.nav.menu_open = app.navigation.menu_open;
+        page.nav.menu_selected = app.navigation.menu_selected;
+        page.history = app.history.clone();
+        page
+    }
+
     #[test]
     fn workspace_page_render_matches_app_render() {
         let mut app = App::new(sample_project(), AppConfig::default());
@@ -2261,6 +2279,80 @@ mod tests {
         assert_eq!(app_panels, page_mouse.panel_areas);
         assert_eq!(app_mouse.link_areas, page_mouse.link_areas);
         assert_eq!(app_mouse.tab_areas, page_mouse.tab_areas);
+        assert_eq!(
+            app_mouse.right_scrollbar_area,
+            page_mouse.right_scrollbar_area
+        );
+        assert_eq!(
+            app_mouse.right_scrollbar_content_len,
+            page_mouse.right_scrollbar_content_len
+        );
+        assert_eq!(
+            app_mouse.right_scrollbar_visible_rows,
+            page_mouse.right_scrollbar_visible_rows
+        );
+    }
+
+    #[test]
+    fn search_page_render_matches_app_render() {
+        let mut app = App::new(sample_project(), AppConfig::default());
+        app.navigation.input_mode = InputMode::CrateSearch;
+        app.navigation.focus = Focus::Search;
+        app.core.search.state.expanded = true;
+        app.core.search.state.query = "serde".to_owned();
+        app.core.search.state.set_results(vec![CrateSearchResult {
+            name: "serde".to_owned(),
+            author: None,
+            version: "1.0.219".to_owned(),
+            description: "A serialization framework for Rust.".to_owned(),
+            homepage: None,
+            documentation: Some("https://docs.rs/serde".to_owned()),
+            repository: Some("https://github.com/serde-rs/serde".to_owned()),
+            downloads: Some(100_000_000),
+            recent_downloads: Some(10_000_000),
+            updated_at: Some("2026-08-01".to_owned()),
+        }]);
+        let width = 120;
+        let height = 40;
+
+        let mut app_mouse = MouseState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                app_mouse = render(frame, &mut app);
+            })
+            .unwrap();
+
+        let page = search_page_from_app(&app);
+        let mut page_mouse = MouseState::default();
+        let mut page_terminal = Terminal::new(TestBackend::new(width, height - 1)).unwrap();
+        page_terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page_mouse = page.render(&app.core, frame, area);
+            })
+            .unwrap();
+
+        let app_buffer = terminal.backend().buffer().clone();
+        let page_buffer = page_terminal.backend().buffer().clone();
+        for y in 0..height - 1 {
+            for x in 0..width {
+                assert_eq!(
+                    app_buffer[(x, y)],
+                    page_buffer[(x, y)],
+                    "buffer mismatch at ({x},{y})"
+                );
+            }
+        }
+
+        let app_panels: Vec<_> = app_mouse
+            .panel_areas
+            .iter()
+            .filter(|(focus, _, _)| *focus != Focus::CommandLog)
+            .cloned()
+            .collect();
+        assert_eq!(app_panels, page_mouse.panel_areas);
+        assert_eq!(app_mouse.link_areas, page_mouse.link_areas);
         assert_eq!(
             app_mouse.right_scrollbar_area,
             page_mouse.right_scrollbar_area
