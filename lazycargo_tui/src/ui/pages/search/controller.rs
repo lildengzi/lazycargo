@@ -22,7 +22,7 @@ use crate::ui::controller::{
     contains, focus_under, link_under, panel_under, DependenciesTab, Focus, InputMode, MouseState,
     Page, WorkspaceTab,
 };
-use crate::ui::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
+use crate::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::pages::search::view::render_search_page;
 use crate::ui::terminal_support::{copy_to_clipboard, open_url};
 use crate::ui::HistoryEntry;
@@ -199,8 +199,14 @@ impl SearchPage {
         let Some(receiver) = &core.search_receiver else {
             return false;
         };
-        let Ok(result) = receiver.try_recv() else {
-            return false;
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                core.search_receiver = None;
+                core.search_started = None;
+                return false;
+            }
         };
         core.search_receiver = None;
         core.search_started = None;
@@ -660,3 +666,54 @@ impl Page for SearchPage {
         mouse_state
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::AppConfig;
+    use crate::core::project::ProjectInfo;
+    use crate::core::task::SearchJobResult;
+    use crate::core::target_analyzer::DiskSnapshot;
+
+    fn sample_project() -> ProjectInfo {
+        ProjectInfo {
+            name: "testapp".to_owned(),
+            version: "0.1.0".to_owned(),
+            workspace_root: String::new(),
+            manifest_path: String::new(),
+            packages: Vec::new(),
+            targets: Vec::new(),
+            dependencies: Vec::new(),
+            features: Vec::new(),
+            workspace_packages: Vec::new(),
+            dependency_packages: Vec::new(),
+            rustc_version: "rustc 1.88.0".to_owned(),
+        }
+    }
+
+    fn core_with_receiver() -> (SearchPage, CoreState) {
+        let page = SearchPage::new();
+        let core = CoreState::new(
+            sample_project(),
+            AppConfig::default(),
+            DiskSnapshot::pending(&[]),
+        );
+        (page, core)
+    }
+
+    /// sender 已断开（线程崩溃/被回收）后，poll_search_job 必须清空 receiver，
+    /// 否则后续搜索会被 "search already running" 永久挡住（回归 Minor-1）。
+    #[test]
+    fn poll_search_job_clears_disconnected_receiver() {
+        let (mut page, mut core) = core_with_receiver();
+        let (tx, rx) = mpsc::channel::<SearchJobResult>();
+        drop(tx);
+        core.search_receiver = Some(rx);
+        core.search_started = Some(Instant::now());
+
+        assert!(!page.poll_search_job(&mut core));
+        assert!(core.search_receiver.is_none());
+        assert!(core.search_started.is_none());
+    }
+}
+

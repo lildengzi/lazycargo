@@ -294,6 +294,9 @@ pub fn run_cli() -> anyhow::Result<()> {
 /// 从解析后的子命令构造 CargoTask；`From<TaskArgs>` 一律落到 Check，
 /// 因此这里按子命令把 kind 设回目标值（Doc/Build/Clippy 会真实执行对应子命令）。
 /// Test/Run/Update 有自己的 From 实现（含 filter/bin/package 等额外参数）。
+/// 仅接受 cargo task 子命令；其余子命令（add/search/config）在这里 panic，
+/// `#[track_caller]` 让 panic 定位到调用点，便于发现误用。
+#[track_caller]
 pub fn command_task(command: Command) -> CargoTask {
     match command {
         Command::Check(args) => task_with_kind(CargoTaskKind::Check, args),
@@ -303,7 +306,10 @@ pub fn command_task(command: Command) -> CargoTask {
         Command::Doc(args) => task_with_kind(CargoTaskKind::Doc, args),
         Command::Run(args) => CargoTask::from(args),
         Command::Update(args) => CargoTask::from(args),
-        other => panic!("expected task subcommand, got {other:?}"),
+        Command::Add(_) | Command::Search(_) | Command::Config => panic!(
+            "command_task requires a cargo task subcommand \
+             (check/build/test/clippy/doc/run/update), got {command:?}"
+        ),
     }
 }
 

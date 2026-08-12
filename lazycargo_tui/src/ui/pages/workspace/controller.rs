@@ -36,7 +36,7 @@ use crate::ui::controller::{
     contains, focus_under, link_under, panel_under, tab_under, BuildCoreTab, ContextTab,
     DependenciesTab, Focus, FocusPanel, InputMode, MouseState, Page, WorkspaceTab, WorkspaceView,
 };
-use crate::ui::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
+use crate::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::pages::workspace::view::{
     build_items, dependency_items_for, output_lines, scope_label, selected_dependency_name,
     workspace_items,
@@ -431,6 +431,16 @@ impl WorkspacePage {
     }
 
     fn selected_dependency(&self, core: &CoreState) -> Option<String> {
+        if self.view.deps_tab == DependenciesTab::DependencyTree {
+            let nodes = core
+                .output
+                .get(&OutputSlot::DepsTree)
+                .map(|ctx| ctx.tree_nodes.as_slice())
+                .unwrap_or(&[]);
+            return dep_tree::flatten_visible(nodes)
+                .get(self.view.selected.tree)
+                .map(|node| node.name.clone());
+        }
         selected_dependency_name(
             &core.project,
             self.view.selected.workspace,
@@ -1474,5 +1484,91 @@ impl Page for WorkspacePage {
         mouse_state.panel_areas.push((Focus::Output, main[1], 0));
         self.render_output(core, frame, main[1], &mut mouse_state);
         mouse_state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::AppConfig;
+    use crate::core::dep_tree::DepNode;
+    use crate::core::project::{DependencyInfo, DependencyKind, ProjectInfo};
+    use crate::core::target_analyzer::DiskSnapshot;
+
+    fn sample_project() -> ProjectInfo {
+        ProjectInfo {
+            name: "testapp".to_owned(),
+            version: "0.1.0".to_owned(),
+            workspace_root: String::new(),
+            manifest_path: String::new(),
+            packages: Vec::new(),
+            targets: Vec::new(),
+            dependencies: vec![DependencyInfo {
+                name: "anyhow".to_owned(),
+                req: "1".to_owned(),
+                kind: DependencyKind::Normal,
+                features: Vec::new(),
+                optional: false,
+                uses_default_features: true,
+            }],
+            features: Vec::new(),
+            workspace_packages: Vec::new(),
+            dependency_packages: Vec::new(),
+            rustc_version: "rustc 1.88.0".to_owned(),
+        }
+    }
+
+    fn dep_node(name: &str, version: &str, depth: usize, children: Vec<DepNode>) -> DepNode {
+        DepNode {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            children,
+            expanded: true,
+            depth,
+            is_duplicate: false,
+            other_versions: Vec::new(),
+            is_conflict: false,
+            features: Vec::new(),
+            feature_source: Vec::new(),
+            dependency_type: "normal".to_owned(),
+            is_selected: false,
+        }
+    }
+
+    fn core_with_tree() -> CoreState {
+        let mut core = CoreState::new(
+            sample_project(),
+            AppConfig::default(),
+            DiskSnapshot::pending(&[]),
+        );
+        let ctx = core.context(OutputSlot::DepsTree);
+        ctx.tree_nodes = vec![dep_node(
+            "tokio",
+            "1.0",
+            0,
+            vec![dep_node("serde", "1.0", 1, Vec::new())],
+        )];
+        core
+    }
+
+    /// DependencyTree tab 下 `d`/`D` 必须取树内选中节点（view.selected.tree）的 crate 名，
+    /// 而不是 Features 列表的 dependency 索引（回归 Minor-4）。
+    #[test]
+    fn selected_dependency_uses_tree_node_in_dependency_tree_tab() {
+        let mut page = WorkspacePage::new();
+        page.view.deps_tab = DependenciesTab::DependencyTree;
+        page.view.selected.tree = 1;
+        let core = core_with_tree();
+        assert_eq!(page.selected_dependency(&core), Some("serde".to_owned()));
+    }
+
+    /// Features tab 下保持原行为：取 dependency 索引对应的 crate 名，与 tree_nodes 无关。
+    #[test]
+    fn selected_dependency_uses_dependency_index_in_features_tab() {
+        let mut page = WorkspacePage::new();
+        page.view.deps_tab = DependenciesTab::Features;
+        page.view.selected.dependency = 0;
+        let core = core_with_tree();
+        assert_eq!(page.selected_dependency(&core), Some("anyhow".to_owned()));
     }
 }

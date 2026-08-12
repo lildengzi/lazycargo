@@ -259,11 +259,11 @@ impl App {
         match state.input_mode {
             InputMode::Normal if self.core.docs_open => Line::from(vec![
                 Span::styled("docs: ", Style::default().fg(Color::Yellow)),
-                Span::raw("j/k scroll, q back, "),
-                Span::styled("D", Style::default().fg(Color::Green)),
-                Span::raw(" browser, "),
-                Span::styled("x", Style::default().fg(Color::Green)),
-                Span::raw(" keys"),
+                Span::raw("j/k scroll, "),
+                Span::styled("PgUp/PgDn", Style::default().fg(Color::Green)),
+                Span::raw(" page, "),
+                Span::styled("q", Style::default().fg(Color::Green)),
+                Span::raw("/Esc back"),
             ]),
             InputMode::CrateSearch => Line::from(vec![
                 Span::styled("search: ", Style::default().fg(Color::Yellow)),
