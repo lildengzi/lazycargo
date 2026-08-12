@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
+use crate::core::store::StoreError;
+
 #[derive(Debug, Clone)]
 pub struct BuildHistory {
     pub entries: Vec<BuildEntry>,
@@ -47,16 +49,11 @@ impl BuildHistory {
         Self { entries, db_path }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        if let Some(parent) = self.db_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let text =
-            serde_json::to_string_pretty(&self.entries).map_err(|error| error.to_string())?;
-        fs::write(&self.db_path, text).map_err(|error| error.to_string())
+    pub fn save(&self) -> Result<(), StoreError> {
+        crate::core::store::atomic_write_json(&self.db_path, &self.entries)
     }
 
-    pub fn add_entry(&mut self, entry: BuildEntry, limit: usize) -> Result<(), String> {
+    pub fn add_entry(&mut self, entry: BuildEntry, limit: usize) -> Result<(), StoreError> {
         self.entries.insert(0, entry);
         self.entries.truncate(limit.max(1));
         self.save()
@@ -138,8 +135,5 @@ pub fn format_duration_ms(duration_ms: u64) -> String {
 }
 
 fn history_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("lazycargo")
-        .join("build_history.json")
+    crate::core::store::history_path()
 }
