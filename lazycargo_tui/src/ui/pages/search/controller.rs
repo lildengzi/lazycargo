@@ -4,7 +4,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyEvent};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -16,7 +18,10 @@ use crate::core::task::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
     SearchJobKind,
 };
-use crate::ui::controller::{DependenciesTab, Focus, InputMode, MouseState, Page, WorkspaceTab};
+use crate::ui::controller::{
+    contains, focus_under, link_under, panel_under, DependenciesTab, Focus, InputMode, MouseState,
+    Page, WorkspaceTab,
+};
 use crate::ui::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::pages::search::view::render_search_page;
 use crate::ui::terminal_support::{copy_to_clipboard, open_url};
@@ -34,6 +39,8 @@ pub(crate) struct SearchNav {
     pub search_return_focus: Focus,
     pub menu_open: bool,
     pub menu_selected: usize,
+    /// 进入搜索时同步的 workspace 选中项，用于 `cargo add -p <package>` 预览。
+    pub workspace_selected: usize,
 }
 
 impl Default for SearchNav {
@@ -49,11 +56,11 @@ impl Default for SearchNav {
             search_return_focus: Focus::Workspace,
             menu_open: false,
             menu_selected: 0,
+            workspace_selected: 0,
         }
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct SearchPage {
     pub nav: SearchNav,
     pub history: Vec<HistoryEntry>,
@@ -61,7 +68,6 @@ pub(crate) struct SearchPage {
 }
 
 impl SearchPage {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             nav: SearchNav::default(),
@@ -113,11 +119,9 @@ impl SearchPage {
                 self.open_search(core);
                 self.nav.message = "search crates".to_owned();
             }
-            NormalKeyAction::FocusDigit(_) => {
-                // TODO(Task 15): focus digits switch workspace/build/deps panels, owned by root App
-            }
+            NormalKeyAction::FocusDigit(value) => self.nav.focus = Focus::from_digit(value),
             _ => {
-                // TODO(Task 15): cargo/target/tree core actions owned by root App
+                // cargo/target/tree 动作属于 Workspace 页，搜索页不处理
             }
         }
 
@@ -174,7 +178,8 @@ impl SearchPage {
         true
     }
 
-    fn poll_search_job(&mut self, core: &mut CoreState) {
+    /// 排空搜索任务结果；返回 true 表示有任务在本次调用完成（调用方需要同步 nav）。
+    pub(crate) fn poll_search_job(&mut self, core: &mut CoreState) -> bool {
         if core.search_receiver.is_some() {
             let elapsed = core
                 .search_started
@@ -191,10 +196,10 @@ impl SearchPage {
             }
         }
         let Some(receiver) = &core.search_receiver else {
-            return;
+            return false;
         };
         let Ok(result) = receiver.try_recv() else {
-            return;
+            return false;
         };
         core.search_receiver = None;
         core.search_started = None;
@@ -233,6 +238,7 @@ impl SearchPage {
             },
         );
         self.history.truncate(core.config.command_history_limit);
+        true
     }
 
     fn search_info_pending_name(&self) -> Option<String> {
@@ -338,8 +344,10 @@ impl SearchPage {
                 (!query.is_empty()).then_some(query)
             })
             .unwrap_or("<crate>");
-        // TODO(Task 15): `-p <package>` 作用域来自根 App 的 workspace 选择
-        let command = format!("cargo add {selected_name}");
+        let command = match self.selected_package(core) {
+            Some(package) => format!("cargo add {selected_name} -p {package}"),
+            None => format!("cargo add {selected_name}"),
+        };
         self.nav.command_preview = command.clone();
         self.nav.message = format!("preview: {command}");
         let detail = core
@@ -350,6 +358,17 @@ impl SearchPage {
             .chain(vec![String::new(), command])
             .collect();
         core.set_slot_lines(OutputSlot::SearchDetail, detail);
+    }
+
+    fn selected_package(&self, core: &CoreState) -> Option<String> {
+        if self.nav.workspace_selected == 0 {
+            None
+        } else {
+            core.project
+                .packages
+                .get(self.nav.workspace_selected.saturating_sub(1))
+                .cloned()
+        }
     }
 
     fn open_search_link(&mut self, core: &CoreState, target: SearchLinkTarget) {
@@ -471,12 +490,125 @@ impl SearchPage {
             }
         }
     }
+
+    fn select_row(&mut self, core: &mut CoreState, focus: Focus, row: usize) {
+        let len = match focus {
+            Focus::Search => core.search.state.result_items().len(),
+            _ => 0,
+        };
+        if len > 0 {
+            core.search.state.selected = row.min(len.saturating_sub(1));
+            core.context(OutputSlot::SearchDetail).scroll = 0;
+        }
+    }
+
+    fn mouse_event(&mut self, core: &mut CoreState, mouse: MouseEvent, mouse_state: &MouseState) {
+        if self.nav.copy_mode {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if focus_under(mouse_state, mouse.column, mouse.row) == Some(Focus::Output) {
+                    self.scroll_right(core, -3);
+                    return;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if focus_under(mouse_state, mouse.column, mouse.row) == Some(Focus::Output) {
+                    self.scroll_right(core, 3);
+                    return;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.scrollbar_to_row(core, mouse_state, mouse.column, mouse.row) {
+                    return;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.scrollbar_to_row(core, mouse_state, mouse.column, mouse.row);
+                return;
+            }
+            _ => return,
+        }
+
+        if let Some((_, url)) = link_under(mouse_state, mouse.column, mouse.row) {
+            self.open_url_message(&url);
+            return;
+        }
+
+        if let Some((focus, area, offset)) = panel_under(mouse_state, mouse.column, mouse.row) {
+            if core.search.state.expanded
+                && focus == Focus::Search
+                && area.height <= 3
+                && mouse.row < area.y.saturating_add(area.height)
+            {
+                self.nav.input_mode = InputMode::CrateSearch;
+                self.nav.message = "search input focused".to_owned();
+                return;
+            }
+            self.nav.focus = focus;
+            if focus == Focus::Output {
+                self.nav.message = "focused right detail".to_owned();
+                return;
+            }
+            let row = offset + mouse.row.saturating_sub(area.y).saturating_sub(1) as usize;
+            self.select_row(core, focus, row);
+            self.nav.message = format!("focused {}", focus.title());
+        }
+    }
+
+    fn open_url_message(&mut self, url: &str) {
+        match open_url(url) {
+            Ok(()) => {
+                self.nav.message = format!("opened: {url}");
+                self.nav.last_status = "opened link".to_owned();
+            }
+            Err(error) => {
+                self.nav.message = format!("failed to open link: {error}");
+                self.nav.last_status = "open link failed".to_owned();
+            }
+        }
+    }
+
+    fn scrollbar_to_row(
+        &mut self,
+        core: &mut CoreState,
+        mouse_state: &MouseState,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let Some(area) = mouse_state.right_scrollbar_area else {
+            return false;
+        };
+        if !contains(area, column, row) {
+            return false;
+        }
+
+        let max_scroll = mouse_state
+            .right_scrollbar_content_len
+            .saturating_sub(mouse_state.right_scrollbar_visible_rows);
+        if max_scroll == 0 {
+            return true;
+        }
+
+        let relative = row.saturating_sub(area.y) as usize;
+        let track = area.height.saturating_sub(1).max(1) as usize;
+        let scroll = (relative * max_scroll / track).min(max_scroll);
+        let ctx = core.context(OutputSlot::SearchDetail);
+        ctx.scroll = scroll;
+        ctx.follow_tail = scroll >= max_scroll;
+        self.nav.focus = Focus::Output;
+        self.nav.message = format!("right detail scroll: {scroll}");
+        true
+    }
 }
 
 impl Page for SearchPage {
     fn handle_key(&mut self, core: &mut CoreState, key: KeyEvent) -> bool {
         if keymap::is_ctrl_c(key) {
-            // TODO(Task 15): kill_running_child owned by root App
+            // ctrl-c 由根 App 在路由前统一处理（kill_running_child 归 WorkspacePage），
+            // 此处仅防御性拦截，不会真正退出。
             return true;
         }
 
@@ -492,7 +624,8 @@ impl Page for SearchPage {
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::Normal => self.handle_normal_key(core, key),
             InputMode::ProjectNewConfirm => {
-                // TODO(Task 15): project-new-confirm owned by Init page
+                // project-new-confirm 由 InitPage 处理，搜索路由下不会到达；
+                // 此处防御性忽略。
                 true
             }
         }
@@ -500,6 +633,10 @@ impl Page for SearchPage {
 
     fn handle_tick(&mut self, core: &mut CoreState) {
         self.poll_search_job(core);
+    }
+
+    fn handle_mouse(&mut self, core: &mut CoreState, mouse: MouseEvent, state: &MouseState) {
+        self.mouse_event(core, mouse, state);
     }
 
     fn render(&self, core: &CoreState, frame: &mut Frame<'_>, area: Rect) -> MouseState {

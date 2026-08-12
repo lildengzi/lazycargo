@@ -2,12 +2,15 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::core::project::ProjectInfo;
 use crate::core::util::format_bytes;
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,17 @@ impl DiskSnapshot {
             target_cache: format_bytes(target_size),
         })
     }
+}
+
+/// 后台线程分析 target，立即返回接收端（`CoreState::disk_receiver`）。
+pub fn analyze_target_async(project: &ProjectInfo, stale_days: u64) -> Receiver<DiskSnapshot> {
+    let (tx, rx) = mpsc::channel();
+    let root = Path::new(&project.workspace_root).to_owned();
+    let packages = project.packages.clone();
+    thread::spawn(move || {
+        let _ = tx.send(analyze_target(&root, &packages, stale_days));
+    });
+    rx
 }
 
 pub fn analyze_target(root: &Path, local_crates: &[String], stale_days: u64) -> DiskSnapshot {

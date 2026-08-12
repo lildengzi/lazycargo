@@ -161,6 +161,11 @@ pub struct CommandSpec {
     pub args: Vec<OsString>,
 }
 
+/// 判断命令是否是一次 `cargo init`（完成后需要重载项目信息）。
+pub fn is_project_init_command(command: &str) -> bool {
+    command == "cargo init" || command.starts_with("cargo init ")
+}
+
 impl CommandSpec {
     pub fn display(&self) -> String {
         std::iter::once(self.program.to_string_lossy().into_owned())

@@ -1,11 +1,14 @@
 use std::cell::Cell;
 use std::io;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::process::ExitStatus;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyEvent};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -13,21 +16,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::core::build_history::{is_recordable_command, latest_crate_timings, BuildEntry};
 use crate::core::command::{
-    CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
+    is_project_init_command, CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile,
+    TaskScope,
 };
 use crate::core::dep_tree;
 use crate::core::model::{CoreState, OutputSlot};
+use crate::core::process::extract_diagnostics;
 use crate::core::project::ProjectInfo;
-use crate::core::target_analyzer::{self, DiskSnapshot};
+use crate::core::target_analyzer::{self, analyze_target_async, DiskSnapshot};
 use crate::core::task::{info_progress_detail, run_info_job, SearchJobConfig};
 use crate::core::util::format_bytes;
 use crate::ui::components::panel::render_panel;
 use crate::ui::components::scrollbar::render_scrollbar;
 use crate::ui::components::style::output_line_to_lines;
 use crate::ui::controller::{
-    BuildCoreTab, ContextTab, DependenciesTab, Focus, FocusPanel, InputMode, MouseState, Page,
-    WorkspaceTab, WorkspaceView,
+    contains, focus_under, link_under, panel_under, tab_under, BuildCoreTab, ContextTab,
+    DependenciesTab, Focus, FocusPanel, InputMode, MouseState, Page, WorkspaceTab, WorkspaceView,
 };
 use crate::ui::keymap::{self, NormalKeyAction, NormalKeyContext, TextInputAction};
 use crate::ui::pages::workspace::view::{
@@ -69,30 +75,19 @@ impl Default for WorkspaceNav {
     }
 }
 
-/// handle_tick/poll 产生的副作用在 render 前 flush 到状态栏。
-#[derive(Default)]
-pub(crate) struct PendingState {
-    #[allow(dead_code)]
-    pub message: Option<String>,
-}
-
-#[allow(dead_code)]
 pub(crate) struct WorkspacePage {
     pub view: WorkspaceView,
     pub nav: WorkspaceNav,
     pub history: Vec<HistoryEntry>,
-    pub pending: PendingState,
     visible_rows: Cell<usize>,
 }
 
 impl WorkspacePage {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             view: WorkspaceView::default(),
             nav: WorkspaceNav::default(),
             history: Vec::new(),
-            pending: PendingState::default(),
             visible_rows: Cell::new(0),
         }
     }
@@ -509,7 +504,7 @@ impl WorkspacePage {
         }
     }
 
-    fn kill_running_child(&mut self, core: &mut CoreState) -> bool {
+    pub(crate) fn kill_running_child(&mut self, core: &mut CoreState) -> bool {
         let Some(mut child) = core.processes.child.take() else {
             return false;
         };
@@ -530,12 +525,31 @@ impl WorkspacePage {
     }
 
     fn refresh_disk_snapshot(&mut self, core: &mut CoreState) {
-        core.disk_receiver = Some(load_disk_snapshot_async(
-            core.project.clone(),
+        core.disk_receiver = Some(analyze_target_async(
+            &core.project,
             core.config.target_stale_days,
         ));
         self.nav.message = "refreshing target analysis".to_owned();
         self.nav.last_status = "target refresh".to_owned();
+    }
+
+    fn poll_disk_snapshot(&mut self, core: &mut CoreState) {
+        let Some(receiver) = &core.disk_receiver else {
+            return;
+        };
+        let Ok(snapshot) = receiver.try_recv() else {
+            return;
+        };
+        core.disk = snapshot;
+        self.view.selected.target_crate = self
+            .view
+            .selected
+            .target_crate
+            .min(core.disk.by_crate.len().saturating_sub(1));
+        core.disk_receiver = None;
+        if self.nav.last_status == "ready" {
+            self.nav.last_status = "disk snapshot ready".to_owned();
+        }
     }
 
     fn clean_target_stale(&mut self, core: &mut CoreState, dry_run: bool) {
@@ -573,6 +587,109 @@ impl WorkspacePage {
             Err(error) => {
                 self.nav.message = format!("target clean failed: {error}");
                 self.nav.last_status = "target clean failed".to_owned();
+            }
+        }
+    }
+
+    fn drain_all_streams(&mut self, core: &mut CoreState) {
+        let max_lines = core.config.output_max_lines;
+        if let Some(finish) = core.poll_process(max_lines) {
+            self.finish_cargo_output(
+                core,
+                finish.slot,
+                finish.command,
+                finish.duration,
+                finish.status,
+            );
+        }
+    }
+
+    fn finish_cargo_output(
+        &mut self,
+        core: &mut CoreState,
+        slot: OutputSlot,
+        command: String,
+        duration: Duration,
+        status: ExitStatus,
+    ) {
+        let success = status.success();
+        self.nav.last_status = if success {
+            format!("ok {:.2}s", duration.as_secs_f32())
+        } else {
+            format!("failed {:.2}s", duration.as_secs_f32())
+        };
+        let lines = {
+            let ctx = core.context(slot);
+            ctx.lines.push(String::new());
+            ctx.lines.push(format!("exit: {status}"));
+            ctx.lines
+                .push(format!("duration: {:.2}s", duration.as_secs_f32()));
+            ctx.lines.clone()
+        };
+        if slot == OutputSlot::BuildLive {
+            core.diagnostics = extract_diagnostics(&lines);
+        }
+        self.history.insert(
+            0,
+            HistoryEntry {
+                command: command.clone(),
+                success,
+                duration,
+            },
+        );
+        self.history.truncate(core.config.command_history_limit);
+        self.record_build_history(core, &command, duration, success);
+        if success && is_project_init_command(&command) {
+            self.reload_project_after_init(core);
+        }
+        if slot == OutputSlot::DepsTree {
+            self.update_dependency_tree_from_output(core);
+        }
+        self.nav.message = format!("finished: {command}");
+    }
+
+    fn record_build_history(&mut self, core: &mut CoreState, command: &str, duration: Duration, success: bool) {
+        if !is_recordable_command(command) {
+            return;
+        }
+        let entry = BuildEntry {
+            timestamp: chrono::Local::now(),
+            command: command.to_owned(),
+            package: self.selected_package(core),
+            duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
+            success,
+            target_triple: std::env::consts::ARCH.to_owned(),
+            rustc_version: core.project.rustc_version.clone(),
+            crate_timings: latest_crate_timings(Path::new(&core.project.workspace_root)),
+        };
+        if let Err(error) = core
+            .history
+            .add_entry(entry, core.config.build_history_limit)
+        {
+            core.diagnostics
+                .push(format!("failed to save build history: {error}"));
+        }
+    }
+
+    fn reload_project_after_init(&mut self, core: &mut CoreState) {
+        match ProjectInfo::load() {
+            Ok(project) => {
+                core.project = project;
+                self.view.selected.workspace = 0;
+                self.view.selected.dependency = 0;
+                core.disk = DiskSnapshot::pending(&core.project.packages);
+                core.disk_receiver = Some(analyze_target_async(
+                    &core.project,
+                    core.config.target_stale_days,
+                ));
+                self.nav.message = "Cargo project initialized".to_owned();
+                self.nav.last_status = "project ready".to_owned();
+                self.nav.current_focus = FocusPanel::Workspace;
+                self.view.ws_tab = WorkspaceTab::CrateInfo;
+            }
+            Err(error) => {
+                self.nav.message = format!("initialized, but reload failed: {error}");
+                self.nav.last_status = "reload failed".to_owned();
             }
         }
     }
@@ -755,9 +872,7 @@ impl WorkspacePage {
         self.view.deps_tab = DependenciesTab::DependencyTree;
     }
 
-    /// tree 命令的产出解析。运行时触发点目前在 App::finish_cargo_output（App 的副本），
-    /// 该页面副本供 15b 迁移 run loop 后由页面触发。
-    #[allow(dead_code)]
+    /// tree 命令的产出解析，由 finish_cargo_output（DepsTree 分支）触发。
     fn update_dependency_tree_from_output(&mut self, core: &mut CoreState) {
         let lines = core.slot_lines(OutputSlot::DepsTree);
         let nodes = dep_tree::parse_tree_output(&lines, &self.view.tree_expanded);
@@ -1128,6 +1243,121 @@ impl WorkspacePage {
         }
         areas
     }
+
+    fn mouse_event(&mut self, core: &mut CoreState, mouse: MouseEvent, mouse_state: &MouseState) {
+        if self.nav.copy_mode {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if focus_under(mouse_state, mouse.column, mouse.row) == Some(Focus::Output) {
+                    self.scroll_right(core, -3);
+                    return;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if focus_under(mouse_state, mouse.column, mouse.row) == Some(Focus::Output) {
+                    self.scroll_right(core, 3);
+                    return;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.scrollbar_to_row(core, mouse_state, mouse.column, mouse.row) {
+                    return;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.scrollbar_to_row(core, mouse_state, mouse.column, mouse.row);
+                return;
+            }
+            _ => return,
+        }
+
+        if let Some((_, url)) = link_under(mouse_state, mouse.column, mouse.row) {
+            self.open_url_message(&url);
+            return;
+        }
+
+        if let Some((_, tab)) = tab_under(mouse_state, mouse.column, mouse.row) {
+            self.apply_context_tab(core, tab);
+            self.set_focus(Focus::Output);
+            self.nav.message = format!("selected {} tab", tab.label());
+            return;
+        }
+
+        if let Some((focus, area, offset)) = panel_under(mouse_state, mouse.column, mouse.row) {
+            self.set_focus(focus);
+            if focus == Focus::Output {
+                self.nav.message = "focused right detail".to_owned();
+                return;
+            }
+            let row = offset + mouse.row.saturating_sub(area.y).saturating_sub(1) as usize;
+            self.select_row(core, focus, row);
+            self.nav.message = format!("focused {}", focus.title());
+        }
+    }
+
+    fn open_url_message(&mut self, url: &str) {
+        match open_url(url) {
+            Ok(()) => {
+                self.nav.message = format!("opened: {url}");
+                self.nav.last_status = "opened link".to_owned();
+            }
+            Err(error) => {
+                self.nav.message = format!("failed to open link: {error}");
+                self.nav.last_status = "open link failed".to_owned();
+            }
+        }
+    }
+
+    fn scrollbar_to_row(&mut self, core: &mut CoreState, mouse_state: &MouseState, column: u16, row: u16) -> bool {
+        let Some(area) = mouse_state.right_scrollbar_area else {
+            return false;
+        };
+        if !contains(area, column, row) {
+            return false;
+        }
+
+        let max_scroll = mouse_state
+            .right_scrollbar_content_len
+            .saturating_sub(mouse_state.right_scrollbar_visible_rows);
+        if max_scroll == 0 {
+            return true;
+        }
+
+        let relative = row.saturating_sub(area.y) as usize;
+        let track = area.height.saturating_sub(1).max(1) as usize;
+        let scroll = (relative * max_scroll / track).min(max_scroll);
+        let ctx = core.context(self.active_output_slot(core));
+        ctx.scroll = scroll;
+        ctx.follow_tail = scroll >= max_scroll;
+        self.set_focus(Focus::Output);
+        self.nav.message = format!("right detail scroll: {scroll}");
+        true
+    }
+
+    fn select_row(&mut self, core: &mut CoreState, focus: Focus, row: usize) {
+        let len = match focus {
+            Focus::Workspace => workspace_items(&core.project).len(),
+            Focus::Dependencies => {
+                dependency_items_for(&core.project, self.view.selected.workspace).len()
+            }
+            Focus::Build => build_items().len(),
+            _ => 0,
+        };
+
+        if len > 0 {
+            *self.selected_mut(focus) = row.min(len.saturating_sub(1));
+            if focus == Focus::Workspace {
+                self.sync_workspace_selection(core);
+            }
+            if focus == Focus::Dependencies {
+                self.view.deps_tab = DependenciesTab::Features;
+                self.reset_slot_scroll(core, OutputSlot::DepsFeatures);
+            }
+        }
+    }
 }
 
 impl Page for WorkspacePage {
@@ -1147,15 +1377,20 @@ impl Page for WorkspacePage {
             InputMode::Normal => self.handle_normal_key(core, key),
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::CrateSearch | InputMode::ProjectNewConfirm => {
-                // TODO(Task 15): search input / project-init confirm owned by root App
+                // search 输入归 SearchPage、project-new-confirm 归 InitPage；
+                // 路由由根 App 分派，此分支在 Workspace 路由下不会到达，防御性忽略。
                 true
             }
         }
     }
 
     fn handle_tick(&mut self, core: &mut CoreState) {
-        // core.poll_disk_snapshot(); 尚未迁入 CoreState（Task 15 提供后在此调用）
-        let _ = core;
+        self.poll_disk_snapshot(core);
+        self.drain_all_streams(core);
+    }
+
+    fn handle_mouse(&mut self, core: &mut CoreState, mouse: MouseEvent, state: &MouseState) {
+        self.mouse_event(core, mouse, state);
     }
 
     fn render(&self, core: &CoreState, frame: &mut Frame<'_>, area: Rect) -> MouseState {
@@ -1174,17 +1409,4 @@ impl Page for WorkspacePage {
     fn title(&self) -> &'static str {
         "[1]-Workspace"
     }
-}
-
-fn load_disk_snapshot_async(project: ProjectInfo, stale_days: u64) -> Receiver<DiskSnapshot> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let root = Path::new(&project.workspace_root);
-        let _ = tx.send(target_analyzer::analyze_target(
-            root,
-            &project.packages,
-            stale_days,
-        ));
-    });
-    rx
 }

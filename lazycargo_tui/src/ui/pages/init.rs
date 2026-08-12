@@ -5,17 +5,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::core::model::CoreState;
+use crate::core::command::CommandSpec;
+use crate::core::model::{CoreState, OutputSlot};
 use crate::ui::components::dialog::centered_rect;
 use crate::ui::controller::{InputMode, MouseState, Page};
 use crate::ui::keymap::{self, ProjectNewConfirmAction};
 
 /// InitPage 持有的导航状态子集（Task 15 由根 App 在调用前同步）。
-#[allow(dead_code)]
 pub(crate) struct InitNav {
     pub input_mode: InputMode,
     pub message: String,
     pub last_status: String,
+    /// Yes 应答过，App 在路由切回 workspace 时据此把焦点切到 Build 面板。
+    pub accepted: bool,
 }
 
 impl Default for InitNav {
@@ -24,17 +26,16 @@ impl Default for InitNav {
             input_mode: InputMode::ProjectNewConfirm,
             message: "no Cargo project: initialize here? y/n".to_owned(),
             last_status: "limited mode".to_owned(),
+            accepted: false,
         }
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct InitPage {
     pub nav: InitNav,
 }
 
 impl InitPage {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             nav: InitNav::default(),
@@ -43,12 +44,20 @@ impl InitPage {
 }
 
 impl Page for InitPage {
-    fn handle_key(&mut self, _core: &mut CoreState, key: KeyEvent) -> bool {
+    fn handle_key(&mut self, core: &mut CoreState, key: KeyEvent) -> bool {
         match keymap::project_new_confirm_action(key) {
             ProjectNewConfirmAction::Yes => {
                 self.nav.input_mode = InputMode::Normal;
-                // TODO(Task 15): run cargo init (process spawn) owned by root App
-                self.nav.message = "initializing project".to_owned();
+                self.nav.accepted = true;
+                self.nav.message = "running: cargo init".to_owned();
+                let spec = CommandSpec {
+                    program: "cargo".into(),
+                    args: vec!["init".into()],
+                };
+                if core.spawn_command(&spec, OutputSlot::BuildLive).is_err() {
+                    self.nav.last_status = "error".to_owned();
+                    self.nav.message = format!("failed: {}", spec.display());
+                }
             }
             ProjectNewConfirmAction::No => {
                 self.nav.input_mode = InputMode::Normal;

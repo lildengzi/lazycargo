@@ -1,7 +1,6 @@
 pub mod args;
 pub mod core;
 pub mod keymap;
-pub mod state;
 pub mod ui;
 
 pub use args::{parse_args, ArgsError, CliAction};

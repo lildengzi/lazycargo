@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
@@ -131,6 +131,7 @@ pub(crate) trait Page {
     fn handle_tick(&mut self, core: &mut CoreState);
     fn render(&self, core: &CoreState, frame: &mut Frame<'_>, area: Rect) -> MouseState;
     fn title(&self) -> &'static str;
+    fn handle_mouse(&mut self, _core: &mut CoreState, _mouse: MouseEvent, _state: &MouseState) {}
 }
 
 #[allow(dead_code)]
@@ -183,4 +184,47 @@ impl Default for WorkspaceView {
             search_return_focus: Focus::Workspace,
         }
     }
+}
+
+pub(crate) fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+pub(crate) fn link_under(
+    state: &MouseState,
+    column: u16,
+    row: u16,
+) -> Option<(Rect, String)> {
+    state
+        .link_areas
+        .iter()
+        .find(|(area, _)| contains(*area, column, row))
+        .cloned()
+}
+
+pub(crate) fn tab_under(state: &MouseState, column: u16, row: u16) -> Option<(Rect, ContextTab)> {
+    state
+        .tab_areas
+        .iter()
+        .find(|(area, _)| contains(*area, column, row))
+        .copied()
+}
+
+pub(crate) fn panel_under(
+    state: &MouseState,
+    column: u16,
+    row: u16,
+) -> Option<(Focus, Rect, usize)> {
+    state
+        .panel_areas
+        .iter()
+        .find(|(_, area, _)| contains(*area, column, row))
+        .copied()
+}
+
+pub(crate) fn focus_under(state: &MouseState, column: u16, row: u16) -> Option<Focus> {
+    panel_under(state, column, row).map(|(focus, _, _)| focus)
 }
