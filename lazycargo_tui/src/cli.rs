@@ -276,17 +276,72 @@ pub fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
     match cli.command {
-        Command::Check(args) => execute_task(CargoTask::from(args), &cwd),
-        Command::Build(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Check(args) => execute_task(command_task(Command::Check(args)), &cwd),
+        Command::Build(args) => execute_task(command_task(Command::Build(args)), &cwd),
         Command::Test(args) => execute_task(CargoTask::from(args), &cwd),
-        Command::Clippy(args) => execute_task(CargoTask::from(args), &cwd),
-        Command::Doc(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Clippy(args) => execute_task(command_task(Command::Clippy(args)), &cwd),
+        Command::Doc(args) => execute_doc(command_task(Command::Doc(args)), &cwd),
         Command::Run(args) => execute_task(CargoTask::from(args), &cwd),
         Command::Update(args) => execute(&CargoTask::from(args).to_command(), &cwd, false),
         Command::Add(args) => execute(&DependencyAddPlan::from(args).to_command(), &cwd, false),
         Command::Search(args) => run_search(&CrateSearchQuery::from(args)),
         Command::Config => print_config(),
     }
+}
+
+/// 从解析后的子命令构造 CargoTask；`From<TaskArgs>` 一律落到 Check，
+/// 因此这里按子命令把 kind 设回目标值（Doc/Build/Clippy 会真实执行对应子命令）。
+/// Test/Run/Update 有自己的 From 实现（含 filter/bin/package 等额外参数）。
+pub fn command_task(command: Command) -> CargoTask {
+    match command {
+        Command::Check(args) => task_with_kind(CargoTaskKind::Check, args),
+        Command::Build(args) => task_with_kind(CargoTaskKind::Build, args),
+        Command::Test(args) => CargoTask::from(args),
+        Command::Clippy(args) => task_with_kind(CargoTaskKind::Clippy, args),
+        Command::Doc(args) => task_with_kind(CargoTaskKind::Doc, args),
+        Command::Run(args) => CargoTask::from(args),
+        Command::Update(args) => CargoTask::from(args),
+        other => panic!("expected task subcommand, got {other:?}"),
+    }
+}
+
+fn task_with_kind(kind: CargoTaskKind, args: TaskArgs) -> CargoTask {
+    let mut task = CargoTask::from(args);
+    task.kind = kind;
+    task
+}
+
+/// `lazycargo doc` 执行成功后，解析本地生成的文档首页并在浏览器打开。
+/// `cargo doc` 只为每个 crate 生成 `target/doc/<crate>/index.html`（无根 index.html），
+/// 因此单包/`-p <package>` → `target/doc/<package>/index.html`，
+/// workspace → 根 package 的 `target/doc/<root>/index.html`。
+fn execute_doc(mut task: CargoTask, cwd: &Path) -> anyhow::Result<()> {
+    let auto_scoped = apply_auto_scope(&mut task, cwd);
+    execute(&task.to_command(), cwd, auto_scoped)?;
+    let project = ProjectInfo::load().ok();
+    let workspace_root = project
+        .as_ref()
+        .map(|project| project.workspace_root.clone())
+        .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+    let package = match &task.scope {
+        TaskScope::Package(name) => Some(name.clone()),
+        _ => project
+            .map(|project| project.name)
+            .or_else(|| cwd.file_name().map(|name| name.to_string_lossy().into_owned())),
+    };
+    match docs_index_after_task(Path::new(&workspace_root), package.as_deref()) {
+        Some(path) => {
+            open::that(&path).map_err(|error| anyhow::anyhow!("failed to open {}: {error}", path.display()))?;
+            println!("opened docs: {}", path.display());
+        }
+        None => println!("docs built, but no target/doc/<crate>/index.html found"),
+    }
+    Ok(())
+}
+
+/// 解析 doc 构建产物首页；workspace 用根 index.html，单包优先 `target/doc/<name>/index.html`。
+pub fn docs_index_after_task(workspace_root: &Path, package_name: Option<&str>) -> Option<std::path::PathBuf> {
+    crate::core::docs::local_docs_index(&workspace_root.to_string_lossy(), package_name)
 }
 
 /// 根据当前工作目录推断 scope。cwd 属于某个 workspace member → Package；在 workspace 根 → Workspace；否则 CurrentPackage。

@@ -141,6 +141,69 @@ fn config_command_is_recognized() {
 }
 
 #[test]
+fn doc_command_runs_cargo_doc_not_check() {
+    let cli = Cli::try_parse_from(["lazycargo", "doc"]).unwrap();
+    let task = lazycargo::cli::command_task(cli.command);
+    assert_eq!(task.to_command().display(), "cargo doc");
+}
+
+#[test]
+fn doc_command_scopes_to_workspace_member() {
+    let cli = Cli::try_parse_from(["lazycargo", "doc", "-p", "app", "--no-default-features"]).unwrap();
+    let task = lazycargo::cli::command_task(cli.command);
+    assert_eq!(
+        task.to_command().display(),
+        "cargo doc -p app --no-default-features"
+    );
+}
+
+#[test]
+fn build_command_runs_cargo_build_not_check() {
+    let cli = Cli::try_parse_from(["lazycargo", "build", "--release"]).unwrap();
+    let task = lazycargo::cli::command_task(cli.command);
+    assert_eq!(task.to_command().display(), "cargo build --release");
+}
+
+#[test]
+fn clippy_command_runs_cargo_clippy() {
+    let cli = Cli::try_parse_from(["lazycargo", "clippy"]).unwrap();
+    let task = lazycargo::cli::command_task(cli.command);
+    assert_eq!(task.to_command().display(), "cargo clippy --all-targets");
+}
+
+#[test]
+fn docs_index_resolution_workspace_scope_uses_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = dir.path().join("target").join("doc");
+    std::fs::create_dir_all(doc.join("app")).unwrap();
+    std::fs::write(doc.join("index.html"), "root").unwrap();
+    std::fs::write(doc.join("app").join("index.html"), "app").unwrap();
+    assert_eq!(
+        lazycargo::cli::docs_index_after_task(dir.path(), None),
+        Some(doc.join("index.html"))
+    );
+}
+
+#[test]
+fn docs_index_resolution_package_scope_uses_package_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = dir.path().join("target").join("doc");
+    std::fs::create_dir_all(doc.join("app")).unwrap();
+    std::fs::write(doc.join("index.html"), "root").unwrap();
+    std::fs::write(doc.join("app").join("index.html"), "app").unwrap();
+    assert_eq!(
+        lazycargo::cli::docs_index_after_task(dir.path(), Some("app")),
+        Some(doc.join("app").join("index.html"))
+    );
+}
+
+#[test]
+fn docs_index_resolution_missing_returns_none() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(lazycargo::cli::docs_index_after_task(dir.path(), Some("app")), None);
+}
+
+#[test]
 fn rejects_all_features_combined_with_specific_features() {
     let error =
         Cli::try_parse_from(["lazycargo", "check", "--all-features", "-F", "sqlite"]).unwrap_err();

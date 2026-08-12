@@ -168,6 +168,7 @@ pub struct CoreState {
     pub search_started: Option<Instant>,
     pub docs: DocsModel,
     pub docs_receiver: Option<Receiver<DocsFetchResult>>,
+    pub docs_open: bool,
     pub diagnostics: Vec<String>,
 }
 
@@ -195,6 +196,7 @@ impl CoreState {
             search_started: None,
             docs: DocsModel::default(),
             docs_receiver: None,
+            docs_open: false,
             diagnostics: Vec::new(),
         }
     }
@@ -295,7 +297,6 @@ impl CoreState {
     }
 
     /// 标记 DocsReadme 初始行并异步拉取 README；README 失败回退 crates.io 描述。
-    #[allow(dead_code)]
     pub fn open_docs(&mut self, name: &str, version: &str, timeout: Duration) {
         self.docs.name = name.to_owned();
         self.docs.version = version.to_owned();

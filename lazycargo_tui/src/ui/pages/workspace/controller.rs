@@ -18,10 +18,11 @@ use ratatui::Frame;
 
 use crate::core::build_history::{is_recordable_command, latest_crate_timings, BuildEntry};
 use crate::core::command::{
-    is_project_init_command, CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile,
-    TaskScope,
+    is_doc_command, is_project_init_command, CargoTask, CargoTaskKind, CommandSpec,
+    FeatureSelection, Profile, TaskScope,
 };
 use crate::core::dep_tree;
+use crate::core::docs::{docs_root_url, local_docs_index};
 use crate::core::model::{CoreState, OutputSlot};
 use crate::core::process::extract_diagnostics;
 use crate::core::project::ProjectInfo;
@@ -164,6 +165,8 @@ impl WorkspacePage {
             NormalKeyAction::PreviewAdd => self.preview_add(core),
             NormalKeyAction::OpenCrates => self.open_search_link(core, SearchLinkTarget::Crates),
             NormalKeyAction::OpenDocs => self.open_search_link(core, SearchLinkTarget::Docs),
+            NormalKeyAction::OpenDocsInline => self.open_deps_docs_inline(core),
+            NormalKeyAction::OpenDocsJump => self.open_deps_docs_jump(core),
             NormalKeyAction::OpenRepository => {
                 self.open_search_link(core, SearchLinkTarget::Repository)
             }
@@ -427,6 +430,38 @@ impl WorkspacePage {
         self.view.deps_tab = DependenciesTab::Features;
     }
 
+    fn selected_dependency(&self, core: &CoreState) -> Option<String> {
+        selected_dependency_name(
+            &core.project,
+            self.view.selected.workspace,
+            self.view.selected.dependency,
+        )
+    }
+
+    /// 依赖面板 `d`：在 TUI 内嵌阅读 docs.rs README，路由由根 App 切到 DocsPage。
+    fn open_deps_docs_inline(&mut self, core: &mut CoreState) {
+        let Some(name) = self.selected_dependency(core) else {
+            self.nav.message = "no dependency selected".to_owned();
+            return;
+        };
+        core.open_docs(&name, "latest", core.config.network_timeout());
+        core.docs_open = true;
+        self.nav.message = format!("reading docs for {name}...");
+    }
+
+    /// 依赖面板 `D`：浏览器打开 docs.rs（docs_root_url 自动重定向最新版）。
+    fn open_deps_docs_jump(&mut self, core: &CoreState) {
+        let Some(name) = self.selected_dependency(core) else {
+            self.nav.message = "no dependency selected".to_owned();
+            return;
+        };
+        let url = docs_root_url(&name);
+        match open_url(&url) {
+            Ok(()) => self.open_url_message_success(&url),
+            Err(error) => self.open_url_message_error(error),
+        }
+    }
+
     fn move_tree_selection(&mut self, core: &mut CoreState, delta: isize) {
         let len = core
             .output
@@ -642,10 +677,37 @@ impl WorkspacePage {
         if success && is_project_init_command(&command) {
             self.reload_project_after_init(core);
         }
+        if success && is_doc_command(&command) {
+            self.open_local_docs(core);
+        }
         if slot == OutputSlot::DepsTree {
             self.update_dependency_tree_from_output(core);
         }
         self.nav.message = format!("finished: {command}");
+    }
+
+    /// doc 命令成功后自动在浏览器打开本地生成的文档首页。
+    /// cargo doc 只为每个 crate 生成 `target/doc/<crate>/index.html`（无根 index.html），
+    /// 因此单包/`-p <package>` → `target/doc/<package>/index.html`，workspace → 根 package。
+    fn open_local_docs(&mut self, core: &CoreState) {
+        let package = self
+            .selected_package(core)
+            .unwrap_or_else(|| core.project.name.clone());
+        let Some(path) = local_docs_index(&core.project.workspace_root, Some(&package)) else {
+            self.nav.message = "docs built, but no target/doc/<crate>/index.html found".to_owned();
+            self.nav.last_status = "docs built".to_owned();
+            return;
+        };
+        match open_url(&path.to_string_lossy()) {
+            Ok(()) => {
+                self.nav.message = format!("opened local docs: {}", path.display());
+                self.nav.last_status = "docs opened".to_owned();
+            }
+            Err(error) => {
+                self.nav.message = format!("failed to open local docs: {error}");
+                self.nav.last_status = "docs open failed".to_owned();
+            }
+        }
     }
 
     fn record_build_history(&mut self, core: &mut CoreState, command: &str, duration: Duration, success: bool) {

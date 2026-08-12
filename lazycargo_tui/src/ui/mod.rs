@@ -28,6 +28,7 @@ mod terminal_support;
 
 use components::{command_log::render_command_log, menu::render_keys_dialog};
 
+use pages::docs::controller::DocsPage;
 use pages::init::InitPage;
 use pages::search::controller::SearchPage;
 use pages::workspace::controller::WorkspacePage;
@@ -39,20 +40,22 @@ pub(crate) struct HistoryEntry {
     pub(crate) duration: Duration,
 }
 
-/// 当前活动页面路由：Search（搜索展开）→ Init（无 Cargo 项目的初始化确认）→ Workspace。
+/// 当前活动页面路由：Docs（TUI 内嵌文档阅读）→ Search（搜索展开）→ Init（无 Cargo 项目的初始化确认）→ Workspace。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
     Workspace,
     Search,
+    Docs,
     Init,
 }
 
 /// 根 App 是页面装配器 + 事件循环接线：不持有 navigation/selection/history，
-/// 全部由常驻的 `WorkspacePage`（及 `SearchPage`/`InitPage`）持有，路由切换时同步。
+/// 全部由常驻的 `WorkspacePage`（及 `SearchPage`/`DocsPage`/`InitPage`）持有，路由切换时同步。
 struct App {
     core: CoreState,
     page: WorkspacePage,
     search: SearchPage,
+    docs: DocsPage,
     init: InitPage,
     route_prev: Route,
 }
@@ -95,13 +98,16 @@ impl App {
             core,
             page: WorkspacePage::new(),
             search: SearchPage::new(),
+            docs: DocsPage::new(),
             init: InitPage::new(),
             route_prev: Route::Workspace,
         }
     }
 
     fn route(&self) -> Route {
-        if self.core.search.state.expanded {
+        if self.core.docs_open {
+            Route::Docs
+        } else if self.core.search.state.expanded {
             Route::Search
         } else if self.page.nav.input_mode == InputMode::ProjectNewConfirm {
             Route::Init
@@ -110,8 +116,9 @@ impl App {
         }
     }
 
-    /// 路由切换时同步各页面的导航状态子集。路由由 `core.search.state.expanded` /
-    /// `page.nav.input_mode` 决定，只可能发生在 Workspace ↔ Search / Workspace ↔ Init。
+    /// 路由切换时同步各页面的导航状态子集。路由由 `core.docs_open` /
+    /// `core.search.state.expanded` / `page.nav.input_mode` 决定，只可能发生在
+    /// Workspace ↔ Search、Workspace ↔ Init、Workspace/Search ↔ Docs。
     fn sync_routes(&mut self) {
         let mut route = self.route();
         // Init 对话框被 InitPage 应答（y/n）后其 input_mode 回到 Normal，
@@ -125,12 +132,24 @@ impl App {
         if route == self.route_prev {
             return;
         }
+        let previous = self.route_prev;
         match route {
-            Route::Search => self.enter_search(),
+            Route::Docs => self.enter_docs(),
+            Route::Search => {
+                if previous != Route::Docs {
+                    self.enter_search();
+                }
+            }
             Route::Init => self.enter_init(),
             Route::Workspace => self.leave_to_workspace(),
         }
         self.route_prev = route;
+    }
+
+    fn enter_docs(&mut self) {
+        self.docs.view.scroll = 0;
+        self.docs.view.follow_tail = false;
+        self.docs.view.visible_rows = 0;
     }
 
     fn enter_search(&mut self) {
@@ -189,6 +208,7 @@ impl App {
             return self.page.kill_running_child(&mut self.core);
         }
         match self.route() {
+            Route::Docs => self.docs.handle_key(&mut self.core, key),
             Route::Search => self.search.handle_key(&mut self.core, key),
             Route::Init => self.init.handle_key(&mut self.core, key),
             Route::Workspace => self.page.handle_key(&mut self.core, key),
@@ -197,6 +217,7 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent, mouse_state: &MouseState) {
         match self.route() {
+            Route::Docs => {}
             Route::Search => self.search.handle_mouse(&mut self.core, mouse, mouse_state),
             Route::Init => {}
             Route::Workspace => self.page.handle_mouse(&mut self.core, mouse, mouse_state),
@@ -205,6 +226,12 @@ impl App {
 
     fn command_bar_state(&self) -> CommandBarState {
         match self.route() {
+            Route::Docs => CommandBarState {
+                input_mode: InputMode::Normal,
+                filter: String::new(),
+                last_status: String::new(),
+                copy_mode: false,
+            },
             Route::Search => CommandBarState {
                 input_mode: self.search.nav.input_mode,
                 filter: self.search.nav.filter.clone(),
@@ -229,6 +256,14 @@ impl App {
     fn command_log_line(&self) -> Line<'static> {
         let state = self.command_bar_state();
         match state.input_mode {
+            InputMode::Normal if self.core.docs_open => Line::from(vec![
+                Span::styled("docs: ", Style::default().fg(Color::Yellow)),
+                Span::raw("j/k scroll, q back, "),
+                Span::styled("D", Style::default().fg(Color::Green)),
+                Span::raw(" browser, "),
+                Span::styled("x", Style::default().fg(Color::Green)),
+                Span::raw(" keys"),
+            ]),
             InputMode::CrateSearch => Line::from(vec![
                 Span::styled("search: ", Style::default().fg(Color::Yellow)),
                 Span::raw(keymap::SEARCH_STATUS_HINT),
@@ -375,6 +410,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             app.page.history = app.search.history.clone();
         }
         app.page.handle_tick(&mut app.core);
+        if app.route() == Route::Docs {
+            app.docs.handle_tick(&mut app.core);
+        }
         terminal.draw(|frame| {
             mouse_state = render(frame, app);
         })?;
@@ -402,6 +440,7 @@ fn render(frame: &mut Frame<'_>, app: &App) -> MouseState {
         .split(frame.area());
 
     let mut mouse_state = match app.route() {
+        Route::Docs => app.docs.render(&app.core, frame, root[0]),
         Route::Search => app.search.render(&app.core, frame, root[0]),
         Route::Init => {
             let mouse = app.page.render(&app.core, frame, root[0]);
@@ -415,6 +454,7 @@ fn render(frame: &mut Frame<'_>, app: &App) -> MouseState {
         .push((Focus::CommandLog, root[1], 0));
     render_command_log(frame, &[app.command_log_line()], root[1]);
     let (menu_open, menu_status) = match app.route() {
+        Route::Docs => (false, String::new()),
         Route::Search => (app.search.nav.menu_open, app.search.nav.last_status.clone()),
         Route::Init => (false, app.init.nav.last_status.clone()),
         Route::Workspace => (app.page.nav.menu_open, app.page.nav.last_status.clone()),
@@ -684,5 +724,124 @@ mod tests {
         app.sync_routes();
         assert_eq!(app.route(), Route::Workspace);
         assert_eq!(app.page.nav.input_mode, InputMode::Normal);
+    }
+
+    /// 打开 docs 后路由必须切到 Docs，返回（q）后回到来源 Workspace 路由。
+    #[test]
+    fn docs_open_routes_to_docs_and_back() {
+        let mut app = App::new(sample_project(), AppConfig::default());
+        app.core.docs_open = true;
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Docs);
+
+        app.core.docs_open = false;
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Workspace);
+    }
+
+    /// DocsPage 渲染必须与 App 装配后的 Docs 路由渲染一致。
+    #[test]
+    fn docs_page_render_matches_app_render() {
+        let mut app = App::new(sample_project(), AppConfig::default());
+        app.core.docs_open = true;
+        app.core.docs.name = "serde".to_owned();
+        app.core.docs.version = "latest".to_owned();
+        app.sync_routes();
+        let width = 120;
+        let height = 40;
+
+        let mut app_mouse = MouseState::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                app_mouse = render(frame, &app);
+            })
+            .unwrap();
+
+        let mut page_mouse = MouseState::default();
+        let mut page_terminal = Terminal::new(TestBackend::new(width, height - 1)).unwrap();
+        page_terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page_mouse = app.docs.render(&app.core, frame, area);
+            })
+            .unwrap();
+
+        let app_buffer = terminal.backend().buffer().clone();
+        let page_buffer = page_terminal.backend().buffer().clone();
+        for y in 0..height - 1 {
+            for x in 0..width {
+                assert_eq!(
+                    app_buffer[(x, y)],
+                    page_buffer[(x, y)],
+                    "buffer mismatch at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// 依赖面板选中依赖按 `d`：open_docs + 切 Docs 路由；按 `q` 回到 Workspace。
+    #[test]
+    fn deps_d_opens_docs_route_and_q_returns() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut app = App::new(sample_project(), AppConfig::default());
+        app.page.nav.focus = Focus::Dependencies;
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Workspace);
+
+        let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert!(app.core.docs_open);
+        assert_eq!(app.core.docs.name, "serde");
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Docs);
+
+        let back = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.handle_key(back));
+        assert!(!app.core.docs_open);
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Workspace);
+    }
+
+    /// 搜索页选中 crate 按 `d`：open_docs + 切 Docs 路由；返回后回到 Search。
+    #[test]
+    fn search_d_opens_docs_route_and_returns_to_search() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut app = App::new(sample_project(), AppConfig::default());
+        app.page.nav.input_mode = InputMode::CrateSearch;
+        app.page.nav.focus = Focus::Search;
+        app.core.search.state.expanded = true;
+        app.core.search.state.query = "serde".to_owned();
+        app.core.search.state.set_results(vec![CrateSearchResult {
+            name: "serde".to_owned(),
+            author: None,
+            version: "1.0.219".to_owned(),
+            description: "A serialization framework for Rust.".to_owned(),
+            homepage: None,
+            documentation: Some("https://docs.rs/serde".to_owned()),
+            repository: Some("https://github.com/serde-rs/serde".to_owned()),
+            downloads: Some(100_000_000),
+            recent_downloads: Some(10_000_000),
+            updated_at: Some("2026-08-01".to_owned()),
+        }]);
+        app.sync_routes();
+        // 结果已就绪后退出输入模式，`d` 才作为动作而非查询字符
+        app.search.nav.input_mode = InputMode::Normal;
+        assert_eq!(app.route(), Route::Search);
+
+        let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert!(app.core.docs_open);
+        assert_eq!(app.core.docs.name, "serde");
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Docs);
+
+        let back = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.handle_key(back));
+        assert!(!app.core.docs_open);
+        app.sync_routes();
+        assert_eq!(app.route(), Route::Search);
     }
 }

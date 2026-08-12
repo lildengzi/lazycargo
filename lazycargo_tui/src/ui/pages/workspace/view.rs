@@ -274,6 +274,8 @@ fn dependency_detail_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String
         String::new(),
         "Actions".to_owned(),
         "  enter: inspect".to_owned(),
+        "  d: read docs in TUI".to_owned(),
+        "  D: open docs.rs in browser".to_owned(),
         "  t: cargo tree --offline -e features".to_owned(),
         "  i: cargo tree --offline -e features -i <dependency>".to_owned(),
         "  T/I: allow Cargo to fetch missing registry packages".to_owned(),

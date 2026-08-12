@@ -9,14 +9,12 @@ use crate::ui::controller::{DocsView, MouseState, Page};
 use crate::ui::pages::docs::view::{docs_markdown, render_docs_page};
 
 /// DocsPage 持有的视图状态；内容来自 core 的 DocsReadme/DocsFallback slot。
-#[allow(dead_code)]
 pub(crate) struct DocsPage {
     pub view: DocsView,
     visible_rows: Cell<usize>,
 }
 
 impl DocsPage {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             view: DocsView::default(),
@@ -44,7 +42,9 @@ impl DocsPage {
 impl Page for DocsPage {
     fn handle_key(&mut self, core: &mut CoreState, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return false,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                core.docs_open = false;
+            }
             KeyCode::Char('j') | KeyCode::Down => self.scroll_docs(core, 1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_docs(core, -1),
             KeyCode::PageDown => self.scroll_docs(core, 10),

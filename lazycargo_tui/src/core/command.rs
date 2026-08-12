@@ -166,6 +166,11 @@ pub fn is_project_init_command(command: &str) -> bool {
     command == "cargo init" || command.starts_with("cargo init ")
 }
 
+/// 判断命令是否是一次 `cargo doc`（完成后可以打开本地生成的文档）。
+pub fn is_doc_command(command: &str) -> bool {
+    command == "cargo doc" || command.starts_with("cargo doc ")
+}
+
 impl CommandSpec {
     pub fn display(&self) -> String {
         std::iter::once(self.program.to_string_lossy().into_owned())
@@ -187,5 +192,24 @@ fn shell_quote(value: &str) -> String {
         value.to_owned()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_doc_command_matches_cargo_doc() {
+        assert!(is_doc_command("cargo doc"));
+        assert!(is_doc_command("cargo doc --no-deps"));
+        assert!(is_doc_command("cargo doc -p app --no-deps"));
+    }
+
+    #[test]
+    fn is_doc_command_rejects_other_commands() {
+        assert!(!is_doc_command("cargo check"));
+        assert!(!is_doc_command("cargo build"));
+        assert!(!is_doc_command("cargo docx"));
     }
 }

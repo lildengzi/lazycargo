@@ -111,6 +111,7 @@ impl SearchPage {
             NormalKeyAction::PreviewAdd => self.preview_add(core),
             NormalKeyAction::OpenCrates => self.open_search_link(core, SearchLinkTarget::Crates),
             NormalKeyAction::OpenDocs => self.open_search_link(core, SearchLinkTarget::Docs),
+            NormalKeyAction::OpenDocsInline => self.open_search_docs_inline(core),
             NormalKeyAction::OpenRepository => {
                 self.open_search_link(core, SearchLinkTarget::Repository);
             }
@@ -389,6 +390,17 @@ impl SearchPage {
                 self.nav.last_status = "open link failed".to_owned();
             }
         }
+    }
+
+    /// 搜索选中 crate `d`：在 TUI 内嵌阅读 docs.rs README，路由由根 App 切到 DocsPage。
+    fn open_search_docs_inline(&mut self, core: &mut CoreState) {
+        let Some(result) = core.search.state.selected_result().cloned() else {
+            self.nav.message = "no crate selected".to_owned();
+            return;
+        };
+        core.open_docs(&result.name, &result.version, core.config.network_timeout());
+        core.docs_open = true;
+        self.nav.message = format!("reading docs for {} {}...", result.name, result.version);
     }
 
     fn copy_search_detail(&mut self, core: &CoreState) {

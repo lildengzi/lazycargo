@@ -38,6 +38,26 @@ pub fn local_doc_path(project: &ProjectInfo, name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// 定位本地构建产出的文档首页。workspace 构建 → `target/doc/index.html`；
+/// 单包构建 → `target/doc/<package>/index.html`（缺失时回退根 index.html）。
+pub fn local_docs_index(workspace_root: &str, package_name: Option<&str>) -> Option<PathBuf> {
+    let doc_root = Path::new(workspace_root).join("target").join("doc");
+    match package_name {
+        Some(name) => {
+            let package_index = doc_root.join(name).join("index.html");
+            if package_index.is_file() {
+                Some(package_index)
+            } else {
+                (doc_root.join("index.html").is_file()).then_some(doc_root.join("index.html"))
+            }
+        }
+        None => {
+            let index = doc_root.join("index.html");
+            index.is_file().then_some(index)
+        }
+    }
+}
+
 fn get(url: &str, timeout: Duration) -> Result<String, DocsError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -104,5 +124,42 @@ mod tests {
             local_doc_path_unchecked("/workspace", "serde"),
             PathBuf::from("/workspace/target/doc/serde/index.html")
         );
+    }
+
+    #[test]
+    fn local_docs_index_prefers_package_index_for_single_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("target").join("doc");
+        std::fs::create_dir_all(doc.join("serde")).unwrap();
+        std::fs::write(doc.join("serde").join("index.html"), "docs").unwrap();
+        std::fs::write(doc.join("index.html"), "root").unwrap();
+        let found = local_docs_index(dir.path().to_str().unwrap(), Some("serde")).unwrap();
+        assert_eq!(found, doc.join("serde").join("index.html"));
+    }
+
+    #[test]
+    fn local_docs_index_falls_back_to_root_index_for_single_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("target").join("doc");
+        std::fs::create_dir_all(&doc).unwrap();
+        std::fs::write(doc.join("index.html"), "root").unwrap();
+        let found = local_docs_index(dir.path().to_str().unwrap(), Some("serde")).unwrap();
+        assert_eq!(found, doc.join("index.html"));
+    }
+
+    #[test]
+    fn local_docs_index_uses_root_index_for_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("target").join("doc");
+        std::fs::create_dir_all(&doc).unwrap();
+        std::fs::write(doc.join("index.html"), "root").unwrap();
+        let found = local_docs_index(dir.path().to_str().unwrap(), None).unwrap();
+        assert_eq!(found, doc.join("index.html"));
+    }
+
+    #[test]
+    fn local_docs_index_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(local_docs_index(dir.path().to_str().unwrap(), Some("serde")), None);
     }
 }
