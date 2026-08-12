@@ -30,35 +30,20 @@ pub enum OutputSlot {
     DocsFallback,
 }
 
+#[derive(Default)]
 pub struct ContextOutput {
     pub lines: Vec<String>,
     pub stream_rx: Option<mpsc::Receiver<OutputLine>>,
     pub scroll: usize,
     pub follow_tail: bool,
-    pub visible_rows: usize,
     pub tree_nodes: Vec<DepNode>,
 }
 
 impl ContextOutput {
-    pub fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            stream_rx: None,
-            scroll: 0,
-            follow_tail: false,
-            visible_rows: 0,
-            tree_nodes: Vec::new(),
-        }
-    }
-
     pub fn with_lines(lines: Vec<String>) -> Self {
         Self {
             lines,
-            stream_rx: None,
-            scroll: 0,
-            follow_tail: false,
-            visible_rows: 0,
-            tree_nodes: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -202,7 +187,7 @@ impl CoreState {
     }
 
     pub fn context(&mut self, slot: OutputSlot) -> &mut ContextOutput {
-        self.output.entry(slot).or_insert_with(ContextOutput::new)
+        self.output.entry(slot).or_default()
     }
 
     pub fn slot_lines(&self, slot: OutputSlot) -> Vec<String> {
@@ -252,11 +237,7 @@ impl CoreState {
             ctx.stream_rx = None;
             ctx.tree_nodes.clear();
         }
-        match spawn_streaming(
-            &spec.program,
-            &spec.args,
-            &[("CARGO_TERM_COLOR", "always")],
-        ) {
+        match spawn_streaming(&spec.program, &spec.args, &[("CARGO_TERM_COLOR", "always")]) {
             Ok((child, rx)) => {
                 self.processes.child = Some(child);
                 self.processes.command = command;
@@ -285,7 +266,12 @@ impl CoreState {
                 let slot = self.processes.slot;
                 self.context(slot).drain_stream(max_lines);
                 self.context(slot).stream_rx = None;
-                Some(ProcessFinish { slot, command, duration, status })
+                Some(ProcessFinish {
+                    slot,
+                    command,
+                    duration,
+                    status,
+                })
             }
             Ok(None) => None,
             Err(_) => {

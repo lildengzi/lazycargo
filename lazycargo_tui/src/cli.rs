@@ -3,7 +3,9 @@ use std::path::Path;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 
-use crate::core::command::{CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope};
+use crate::core::command::{
+    CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
+};
 use crate::core::config::AppConfig;
 use crate::core::process::run_captured;
 use crate::core::project::ProjectInfo;
@@ -325,14 +327,21 @@ fn execute_doc(mut task: CargoTask, cwd: &Path) -> anyhow::Result<()> {
         .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
     let package = match &task.scope {
         TaskScope::Package(name) => Some(name.clone()),
-        _ => project
-            .map(|project| project.name)
-            .or_else(|| cwd.file_name().map(|name| name.to_string_lossy().into_owned())),
+        _ => project.map(|project| project.name).or_else(|| {
+            cwd.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
     };
     match docs_index_after_task(Path::new(&workspace_root), package.as_deref()) {
         Some(path) => {
-            open::that(&path).map_err(|error| anyhow::anyhow!("failed to open {}: {error}", path.display()))?;
-            println!("opened docs: {}", path.display());
+            if let Err(error) = open::that(&path) {
+                eprintln!(
+                    "warning: docs built, but failed to open {}: {error}",
+                    path.display()
+                );
+            } else {
+                println!("opened docs: {}", path.display());
+            }
         }
         None => println!("docs built, but no target/doc/<crate>/index.html found"),
     }
@@ -340,7 +349,10 @@ fn execute_doc(mut task: CargoTask, cwd: &Path) -> anyhow::Result<()> {
 }
 
 /// 解析 doc 构建产物首页；workspace 用根 index.html，单包优先 `target/doc/<name>/index.html`。
-pub fn docs_index_after_task(workspace_root: &Path, package_name: Option<&str>) -> Option<std::path::PathBuf> {
+pub fn docs_index_after_task(
+    workspace_root: &Path,
+    package_name: Option<&str>,
+) -> Option<std::path::PathBuf> {
     crate::core::docs::local_docs_index(&workspace_root.to_string_lossy(), package_name)
 }
 
@@ -354,7 +366,8 @@ pub fn auto_scope(cwd: &Path, project: &ProjectInfo) -> TaskScope {
         .iter()
         .filter_map(|package| {
             let pkg_dir = Path::new(&package.manifest_path).parent()?;
-            cwd.starts_with(pkg_dir).then_some((package, pkg_dir.as_os_str().len()))
+            cwd.starts_with(pkg_dir)
+                .then_some((package, pkg_dir.as_os_str().len()))
         })
         .max_by_key(|(_, depth)| *depth);
     if let Some((package, _)) = best {

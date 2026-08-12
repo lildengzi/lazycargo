@@ -1,7 +1,9 @@
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseEvent};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, MouseEvent,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -74,7 +76,8 @@ impl App {
         let output = project_health_snapshot(&project, &disk);
         let mut core = CoreState::new(project.clone(), config, disk);
         core.disk_receiver = disk_receiver;
-        core.output.insert(OutputSlot::BuildLive, ContextOutput::with_lines(output));
+        core.output
+            .insert(OutputSlot::BuildLive, ContextOutput::with_lines(output));
         core.output.insert(
             OutputSlot::BuildConfig,
             ContextOutput::with_lines(vec!["no build/check run yet".to_owned()]),
@@ -148,8 +151,6 @@ impl App {
 
     fn enter_docs(&mut self) {
         self.docs.view.scroll = 0;
-        self.docs.view.follow_tail = false;
-        self.docs.view.visible_rows = 0;
     }
 
     fn enter_search(&mut self) {
@@ -719,8 +720,10 @@ mod tests {
         app.sync_routes();
         assert_eq!(app.route(), Route::Init);
 
-        app.init
-            .handle_key(&mut app.core, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.init.handle_key(
+            &mut app.core,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
         app.sync_routes();
         assert_eq!(app.route(), Route::Workspace);
         assert_eq!(app.page.nav.input_mode, InputMode::Normal);

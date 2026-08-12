@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://crates.io/crates/lazycargo-tui"><img src="https://img.shields.io/crates/v/lazycargo-tui.svg" alt="Crates.io"></a>
   <a href="https://github.com/lildengzi/lazycargo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lildengzi/lazycargo" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/rust-1.81+-blue" alt="Rust">
+  <img src="https://img.shields.io/badge/rust-1.88+-blue" alt="Rust">
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ cargo install lazycargo-tui
 cd your-project && lazycargo
 ```
 
-也支持命令行模式：
+也是真实的命令行执行器：
 
 ```bash
 lazycargo check --workspace
@@ -38,6 +38,10 @@ lazycargo build -p lazycargo-tui --release
 lazycargo add serde_json --features preserve_order
 lazycargo config
 ```
+
+CLI 子命令会真实执行 Cargo。在多 crate workspace 下，scope 会按当前目录自动推断（auto-scope）：在某个 member 目录内 → `-p <package>`，在 workspace 根 → 整个 workspace。可用 `-p <name>` 或 `--workspace` 覆盖。
+
+CLI 只暴露了一部分受支持的 Cargo 选项（clap 严格模式，未知 flag 会被拒绝）。未覆盖的参数可用 `--` 透传（如 `lazycargo test -- --nocapture`），或直接用原版 `cargo`。
 
 ## 界面预览
 
@@ -48,7 +52,7 @@ lazycargo config
 
 ## 快捷键
 
-`1` `2` `3` — 切换面板 | `Tab` — 循环焦点 | `[` `]` — 切换标签 | `s` — 搜索 | `/` — 过滤 | `c` — check | `b` — build | `t` — 依赖树 | `i` — 反向树 | `m` — 复制模式 | `q` — 退出
+`1` `2` `3` — 切换面板 | `Tab` — 循环焦点 | `[` `]` — 切换标签 | `s` — 搜索 | `/` — 过滤 | `c` — check | `b` — build | `t` — 依赖树 | `i` — 反向树 | `d` — TUI 内阅读文档 | `D` — 打开 docs.rs | `m` — 复制模式 | `q` — 退出
 
 ## 致谢
 

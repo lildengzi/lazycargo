@@ -26,12 +26,22 @@ fn task_from(command: Command) -> CargoTask {
 
 #[test]
 fn check_command_builds_package_scope_release_and_sorted_features() {
-    let cli =
-        Cli::try_parse_from(["lazycargo", "check", "-p", "app", "-F", "sqlite,serde", "--release"])
-            .unwrap();
+    let cli = Cli::try_parse_from([
+        "lazycargo",
+        "check",
+        "-p",
+        "app",
+        "-F",
+        "sqlite,serde",
+        "--release",
+    ])
+    .unwrap();
     let task = task_from(cli.command);
 
-    assert_eq!(task.to_command().display(), "cargo check -p app --release --features serde,sqlite");
+    assert_eq!(
+        task.to_command().display(),
+        "cargo check -p app --release --features serde,sqlite"
+    );
 }
 
 #[test]
@@ -55,9 +65,15 @@ fn check_command_accepts_workspace_scope_and_target() {
 
 #[test]
 fn test_command_builds_filter_with_nocapture() {
-    let cli =
-        Cli::try_parse_from(["lazycargo", "test", "-p", "core", "user_service", "--nocapture"])
-            .unwrap();
+    let cli = Cli::try_parse_from([
+        "lazycargo",
+        "test",
+        "-p",
+        "core",
+        "user_service",
+        "--nocapture",
+    ])
+    .unwrap();
     let task = task_from(cli.command);
 
     assert_eq!(
@@ -68,9 +84,16 @@ fn test_command_builds_filter_with_nocapture() {
 
 #[test]
 fn run_command_builds_binary_with_passthrough_args() {
-    let cli =
-        Cli::try_parse_from(["lazycargo", "run", "--bin", "server", "--", "--port", "3000"])
-            .unwrap();
+    let cli = Cli::try_parse_from([
+        "lazycargo",
+        "run",
+        "--bin",
+        "server",
+        "--",
+        "--port",
+        "3000",
+    ])
+    .unwrap();
     let task = task_from(cli.command);
 
     assert_eq!(
@@ -101,14 +124,24 @@ fn add_build_optional_dependency_builds_plan() {
 
     assert_eq!(plan.kind, lazycargo::DependencyKind::Build);
     assert!(plan.optional);
-    assert_eq!(plan.to_command().display(), "cargo add cc --build --optional");
+    assert_eq!(
+        plan.to_command().display(),
+        "cargo add cc --build --optional"
+    );
 }
 
 #[test]
 fn add_normal_dependency_builds_plan_with_package_and_features() {
-    let cli =
-        Cli::try_parse_from(["lazycargo", "add", "tokio", "-p", "app", "-F", "macros,rt-multi-thread"])
-            .unwrap();
+    let cli = Cli::try_parse_from([
+        "lazycargo",
+        "add",
+        "tokio",
+        "-p",
+        "app",
+        "-F",
+        "macros,rt-multi-thread",
+    ])
+    .unwrap();
     let Command::Add(args) = cli.command else {
         panic!("expected add");
     };
@@ -149,7 +182,8 @@ fn doc_command_runs_cargo_doc_not_check() {
 
 #[test]
 fn doc_command_scopes_to_workspace_member() {
-    let cli = Cli::try_parse_from(["lazycargo", "doc", "-p", "app", "--no-default-features"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["lazycargo", "doc", "-p", "app", "--no-default-features"]).unwrap();
     let task = lazycargo::cli::command_task(cli.command);
     assert_eq!(
         task.to_command().display(),
@@ -200,7 +234,10 @@ fn docs_index_resolution_package_scope_uses_package_index() {
 #[test]
 fn docs_index_resolution_missing_returns_none() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(lazycargo::cli::docs_index_after_task(dir.path(), Some("app")), None);
+    assert_eq!(
+        lazycargo::cli::docs_index_after_task(dir.path(), Some("app")),
+        None
+    );
 }
 
 #[test]
@@ -213,8 +250,7 @@ fn rejects_all_features_combined_with_specific_features() {
 
 #[test]
 fn rejects_dev_combined_with_build_dependency_kind() {
-    let error =
-        Cli::try_parse_from(["lazycargo", "add", "tokio", "--dev", "--build"]).unwrap_err();
+    let error = Cli::try_parse_from(["lazycargo", "add", "tokio", "--dev", "--build"]).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
 }
@@ -240,7 +276,10 @@ fn project(workspace_root: &str, members: &[(&str, &str)]) -> ProjectInfo {
 
 #[test]
 fn auto_scope_picks_workspace_member_from_inside_its_dir() {
-    let project = project("/ws", &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")]);
+    let project = project(
+        "/ws",
+        &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")],
+    );
 
     assert_eq!(
         auto_scope(Path::new("/ws/a/src"), &project),
@@ -250,7 +289,10 @@ fn auto_scope_picks_workspace_member_from_inside_its_dir() {
 
 #[test]
 fn auto_scope_returns_workspace_from_root_outside_any_member_dir() {
-    let project = project("/ws", &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")]);
+    let project = project(
+        "/ws",
+        &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")],
+    );
 
     assert_eq!(auto_scope(Path::new("/ws"), &project), TaskScope::Workspace);
 }
@@ -284,18 +326,12 @@ fn auto_scope_picks_deepest_member_for_nested_workspace() {
 #[test]
 fn command_surface_exposes_cargo_subcommands() {
     let command = Cli::command();
-    let names: Vec<&str> = command.get_subcommands().map(|sub| sub.get_name()).collect();
+    let names: Vec<&str> = command
+        .get_subcommands()
+        .map(|sub| sub.get_name())
+        .collect();
     for expected in [
-        "check",
-        "build",
-        "test",
-        "clippy",
-        "doc",
-        "run",
-        "update",
-        "add",
-        "search",
-        "config",
+        "check", "build", "test", "clippy", "doc", "run", "update", "add", "search", "config",
     ] {
         assert!(names.contains(&expected), "missing subcommand: {expected}");
     }

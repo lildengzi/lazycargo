@@ -125,24 +125,13 @@ pub(crate) struct MouseState {
     pub right_scrollbar_visible_rows: usize,
 }
 
-#[allow(dead_code)]
 pub(crate) trait Page {
     fn handle_key(&mut self, core: &mut CoreState, key: KeyEvent) -> bool;
-    fn handle_tick(&mut self, core: &mut CoreState);
+    fn handle_tick(&mut self, _core: &mut CoreState) {}
     fn render(&self, core: &CoreState, frame: &mut Frame<'_>, area: Rect) -> MouseState;
-    fn title(&self) -> &'static str;
     fn handle_mouse(&mut self, _core: &mut CoreState, _mouse: MouseEvent, _state: &MouseState) {}
 }
 
-#[allow(dead_code)]
-pub(crate) enum PageId {
-    Workspace,
-    Search,
-    Docs,
-    Init,
-}
-
-#[allow(dead_code)]
 pub(crate) struct WorkspaceView {
     pub ws_tab: WorkspaceTab,
     pub build_tab: BuildCoreTab,
@@ -162,16 +151,9 @@ pub(crate) struct SelectedIndex {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub(crate) struct DocsView {
     pub scroll: usize,
-    pub follow_tail: bool,
-    pub visible_rows: usize,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
-pub(crate) struct InitView;
 
 impl Default for WorkspaceView {
     fn default() -> Self {
@@ -193,11 +175,7 @@ pub(crate) fn contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-pub(crate) fn link_under(
-    state: &MouseState,
-    column: u16,
-    row: u16,
-) -> Option<(Rect, String)> {
+pub(crate) fn link_under(state: &MouseState, column: u16, row: u16) -> Option<(Rect, String)> {
     state
         .link_areas
         .iter()

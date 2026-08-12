@@ -5,6 +5,4 @@ pub mod panel;
 pub mod reader;
 pub mod scrollbar;
 pub mod search_input;
-pub mod status_bar;
 pub mod style;
-pub mod tab_bar;

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,7 @@ impl AppConfig {
     }
 }
 
-fn save_config_to_path(path: &PathBuf, config: &AppConfig) -> Result<(), StoreError> {
+fn save_config_to_path(path: &Path, config: &AppConfig) -> Result<(), StoreError> {
     store::atomic_write_json(path, config)
 }
 

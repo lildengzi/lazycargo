@@ -5,7 +5,9 @@ use crate::core::dep_tree;
 use crate::core::model::{CoreState, OutputSlot};
 use crate::core::project::{DependencyInfo, PackageInfo, ProjectInfo};
 use crate::core::util::{format_bytes, progress_bar};
-use crate::ui::controller::{BuildCoreTab, DependenciesTab, FocusPanel, WorkspaceTab, WorkspaceView};
+use crate::ui::controller::{
+    BuildCoreTab, DependenciesTab, FocusPanel, WorkspaceTab, WorkspaceView,
+};
 use crate::ui::HistoryEntry;
 
 #[derive(Clone)]
@@ -306,39 +308,28 @@ fn workspace_metrics_lines(
         "Build Metrics".to_owned(),
         "Last 10 builds".to_owned(),
     ];
-    lines.extend(
-        core.history
-            .entries
-            .iter()
-            .take(10)
-            .map(|entry| {
-                let mark = if entry.success { "ok" } else { "x" };
-                format!(
-                    "  {} {:>7} {} {}",
-                    mark,
-                    format_duration_ms(entry.duration_ms),
-                    entry.timestamp.format("%m-%d %H:%M"),
-                    entry.command
-                )
-            }),
-    );
+    lines.extend(core.history.entries.iter().take(10).map(|entry| {
+        let mark = if entry.success { "ok" } else { "x" };
+        format!(
+            "  {} {:>7} {} {}",
+            mark,
+            format_duration_ms(entry.duration_ms),
+            entry.timestamp.format("%m-%d %H:%M"),
+            entry.command
+        )
+    }));
     if core.history.entries.is_empty() {
         lines.push("  no build history yet".to_owned());
     }
     lines.extend([String::new(), "Recent averages".to_owned()]);
-    lines.extend(
-        core.history
-            .daily_stats(1)
-            .into_iter()
-            .map(|stats| {
-                format!(
-                    "  {} avg: {} ({} runs)",
-                    stats.command,
-                    format_duration_ms(stats.average_ms),
-                    stats.count
-                )
-            }),
-    );
+    lines.extend(core.history.daily_stats(1).into_iter().map(|stats| {
+        format!(
+            "  {} avg: {} ({} runs)",
+            stats.command,
+            format_duration_ms(stats.average_ms),
+            stats.count
+        )
+    }));
     lines.extend([String::new(), "Slowest crates today".to_owned()]);
     let slowest = core.history.slowest_crates(10);
     if slowest.is_empty() {
@@ -353,19 +344,14 @@ fn workspace_metrics_lines(
         }));
     }
     lines.extend([String::new(), "Package disk snapshot".to_owned()]);
-    lines.extend(
-        core.project
-            .workspace_packages
-            .iter()
-            .map(|package| {
-                format!(
-                    "  {} source={} cache={}",
-                    package.name,
-                    package_source_size_label(core, &package.name),
-                    package_target_cache_label(core, &package.name)
-                )
-            }),
-    );
+    lines.extend(core.project.workspace_packages.iter().map(|package| {
+        format!(
+            "  {} source={} cache={}",
+            package.name,
+            package_source_size_label(core, &package.name),
+            package_target_cache_label(core, &package.name)
+        )
+    }));
     lines.extend([String::new(), "Recent command timings".to_owned()]);
     lines.extend(
         history_lines(history)
@@ -384,9 +370,7 @@ fn target_analysis_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> 
     let mut lines = vec![
         format!(
             "Total: {}  |  Stale: {} ({}d+)",
-            core.disk.total_label,
-            core.disk.stale_label,
-            core.config.target_stale_days
+            core.disk.total_label, core.disk.stale_label, core.config.target_stale_days
         ),
         format!("Disk pressure: {}", disk_pressure_bar(core.disk.total_size)),
         format!(
@@ -486,10 +470,7 @@ fn dependency_tree_lines(core: &CoreState, view: &WorkspaceView) -> Vec<String> 
     let visible = dep_tree::flatten_visible(tree_nodes);
     let selected = visible.get(view.selected.tree);
     let mut lines = Vec::new();
-    lines.extend(dep_tree::render_tree_lines(
-        tree_nodes,
-        view.selected.tree,
-    ));
+    lines.extend(dep_tree::render_tree_lines(tree_nodes, view.selected.tree));
     lines.extend([String::new(), "Selected detail".to_owned()]);
     lines.extend(dep_tree::node_detail(selected));
     lines

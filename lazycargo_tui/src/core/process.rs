@@ -82,14 +82,15 @@ pub fn run_captured(
     let started = Instant::now();
 
     loop {
-        match child.try_wait().map_err(|source| ProcessError::Io { source })? {
-            Some(_) => {
-                return child
-                    .wait_with_output()
-                    .map(Some)
-                    .map_err(|source| ProcessError::Io { source });
-            }
-            None => {}
+        if child
+            .try_wait()
+            .map_err(|source| ProcessError::Io { source })?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map(Some)
+                .map_err(|source| ProcessError::Io { source });
         }
 
         if started.elapsed() >= timeout {

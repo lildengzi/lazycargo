@@ -1,9 +1,9 @@
 pub mod build_history;
 pub mod command;
-pub mod model;
 pub mod config;
-pub mod docs;
 pub mod dep_tree;
+pub mod docs;
+pub mod model;
 pub mod process;
 pub mod project;
 pub mod search;

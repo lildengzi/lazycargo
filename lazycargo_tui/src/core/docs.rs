@@ -93,8 +93,8 @@ pub fn fetch_description(name: &str, timeout: Duration) -> Result<String, DocsEr
     struct Version {
         description: Option<String>,
     }
-    let payload: CrateResponse = serde_json::from_str(&body)
-        .map_err(|error| DocsError::Parse(error.to_string()))?;
+    let payload: CrateResponse =
+        serde_json::from_str(&body).map_err(|error| DocsError::Parse(error.to_string()))?;
     payload
         .version
         .description
@@ -108,13 +108,18 @@ mod tests {
 
     #[test]
     fn docs_url_combines_name_and_version() {
-        assert_eq!(docs_url("serde", "1.0.228"), "https://docs.rs/serde/1.0.228");
+        assert_eq!(
+            docs_url("serde", "1.0.228"),
+            "https://docs.rs/serde/1.0.228"
+        );
     }
 
     #[test]
     fn local_doc_path_resolves_under_target_doc() {
-        let mut project = ProjectInfo::default();
-        project.workspace_root = std::env::temp_dir().to_string_lossy().into_owned();
+        let project = ProjectInfo {
+            workspace_root: std::env::temp_dir().to_string_lossy().into_owned(),
+            ..ProjectInfo::default()
+        };
         assert_eq!(local_doc_path(&project, "serde"), None);
     }
 
@@ -160,6 +165,9 @@ mod tests {
     #[test]
     fn local_docs_index_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(local_docs_index(dir.path().to_str().unwrap(), Some("serde")), None);
+        assert_eq!(
+            local_docs_index(dir.path().to_str().unwrap(), Some("serde")),
+            None
+        );
     }
 }

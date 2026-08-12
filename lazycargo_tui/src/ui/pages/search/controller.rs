@@ -643,10 +643,6 @@ impl Page for SearchPage {
         }
     }
 
-    fn handle_tick(&mut self, core: &mut CoreState) {
-        self.poll_search_job(core);
-    }
-
     fn handle_mouse(&mut self, core: &mut CoreState, mouse: MouseEvent, state: &MouseState) {
         self.mouse_event(core, mouse, state);
     }
@@ -662,9 +658,5 @@ impl Page for SearchPage {
             &mut mouse_state,
         );
         mouse_state
-    }
-
-    fn title(&self) -> &'static str {
-        "[Search]"
     }
 }

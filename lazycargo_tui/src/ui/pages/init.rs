@@ -70,8 +70,6 @@ impl Page for InitPage {
         true
     }
 
-    fn handle_tick(&mut self, _core: &mut CoreState) {}
-
     fn render(&self, _core: &CoreState, frame: &mut Frame<'_>, area: Rect) -> MouseState {
         let area = centered_rect(54, 28, area);
         let lines = vec![
@@ -103,9 +101,5 @@ impl Page for InitPage {
         frame.render_widget(Clear, area);
         frame.render_widget(widget, area);
         MouseState::default()
-    }
-
-    fn title(&self) -> &'static str {
-        "[Init]"
     }
 }

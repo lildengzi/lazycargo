@@ -710,7 +710,13 @@ impl WorkspacePage {
         }
     }
 
-    fn record_build_history(&mut self, core: &mut CoreState, command: &str, duration: Duration, success: bool) {
+    fn record_build_history(
+        &mut self,
+        core: &mut CoreState,
+        command: &str,
+        duration: Duration,
+        success: bool,
+    ) {
         if !is_recordable_command(command) {
             return;
         }
@@ -946,11 +952,7 @@ impl WorkspacePage {
             return;
         }
         let visible_len = dep_tree::flatten_visible(&nodes).len();
-        self.view.selected.tree = self
-            .view
-            .selected
-            .tree
-            .min(visible_len.saturating_sub(1));
+        self.view.selected.tree = self.view.selected.tree.min(visible_len.saturating_sub(1));
         let selected = self.view.selected.tree;
         let ctx = core.context(OutputSlot::DepsTree);
         ctx.tree_nodes = nodes;
@@ -1373,7 +1375,13 @@ impl WorkspacePage {
         }
     }
 
-    fn scrollbar_to_row(&mut self, core: &mut CoreState, mouse_state: &MouseState, column: u16, row: u16) -> bool {
+    fn scrollbar_to_row(
+        &mut self,
+        core: &mut CoreState,
+        mouse_state: &MouseState,
+        column: u16,
+        row: u16,
+    ) -> bool {
         let Some(area) = mouse_state.right_scrollbar_area else {
             return false;
         };
@@ -1466,9 +1474,5 @@ impl Page for WorkspacePage {
         mouse_state.panel_areas.push((Focus::Output, main[1], 0));
         self.render_output(core, frame, main[1], &mut mouse_state);
         mouse_state
-    }
-
-    fn title(&self) -> &'static str {
-        "[1]-Workspace"
     }
 }

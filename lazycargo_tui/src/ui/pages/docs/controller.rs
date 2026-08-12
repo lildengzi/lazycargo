@@ -70,8 +70,4 @@ impl Page for DocsPage {
         );
         mouse_state
     }
-
-    fn title(&self) -> &'static str {
-        "[Docs]"
-    }
 }

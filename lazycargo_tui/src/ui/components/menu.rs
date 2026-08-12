@@ -1,45 +1,11 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::keymap;
 
 use super::dialog::centered_rect;
-
-#[allow(dead_code)]
-pub(crate) fn render_menu(frame: &mut Frame<'_>, title: &str, items: &[&str], selected: usize) {
-    let area = centered_rect(70, 64, frame.area());
-    let list_items = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let style = if index == selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from((*item).to_owned())).style(style)
-        })
-        .collect::<Vec<_>>();
-    let widget = List::new(list_items).block(
-        Block::default()
-            .title(Span::styled(
-                title.to_owned(),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Green)),
-    );
-    frame.render_widget(Clear, area);
-    frame.render_widget(widget, area);
-}
 
 pub(crate) fn render_keys_dialog(frame: &mut Frame<'_>, status: &str) {
     let area = centered_rect(70, 64, frame.area());

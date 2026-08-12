@@ -48,7 +48,9 @@ pub(crate) fn render_search_page(
         Focus::Search.title(),
         &nav.filter,
     );
-    mouse_state.panel_areas.push((Focus::Search, left[1], offset));
+    mouse_state
+        .panel_areas
+        .push((Focus::Search, left[1], offset));
     mouse_state.panel_areas.push((
         Focus::Output,
         chunks[1],
@@ -62,12 +64,18 @@ pub(crate) fn render_search_page(
     let detail_len = detail_lines.len();
     let visible = chunks[1].height.saturating_sub(2) as usize;
     visible_rows.set(visible);
-    let detail_offset = core.output
+    let detail_offset = core
+        .output
         .get(&OutputSlot::SearchDetail)
         .map(|ctx| ctx.scroll)
         .unwrap_or(0)
         .min(detail_lines.len().saturating_sub(visible));
-    for (index, line) in detail_lines.iter().skip(detail_offset).take(visible).enumerate() {
+    for (index, line) in detail_lines
+        .iter()
+        .skip(detail_offset)
+        .take(visible)
+        .enumerate()
+    {
         if let Some(url) = first_url(line) {
             let row = chunks[1].y.saturating_add(1 + index as u16);
             let link_area = Rect {

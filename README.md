@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://crates.io/crates/lazycargo-tui"><img src="https://img.shields.io/crates/v/lazycargo-tui.svg" alt="Crates.io"></a>
   <a href="https://github.com/lildengzi/lazycargo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lildengzi/lazycargo" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/rust-1.81+-blue" alt="Rust">
+  <img src="https://img.shields.io/badge/rust-1.88+-blue" alt="Rust">
 </p>
 
 <p align="center">
@@ -32,7 +32,7 @@ cargo install lazycargo-tui
 cd your-project && lazycargo
 ```
 
-Also works as a command runner:
+Also works as a real command runner:
 
 ```bash
 lazycargo check --workspace
@@ -40,6 +40,10 @@ lazycargo build -p lazycargo-tui --release
 lazycargo add serde_json --features preserve_order
 lazycargo config
 ```
+
+CLI subcommands execute Cargo for real. In a multi-crate workspace, scope is inferred from your current directory (auto-scope): inside a member → `-p <package>`, at the workspace root → the whole workspace. Pass `-p <name>` or `--workspace` to override.
+
+The CLI exposes a supported subset of Cargo options (clap strict mode — unknown flags are rejected). For anything not covered, forward via `--` (e.g. `lazycargo test -- --nocapture`) or fall back to plain `cargo`.
 
 ## Screenshots
 
@@ -50,7 +54,7 @@ lazycargo config
 
 ## Key Bindings
 
-`1` `2` `3` — panels | `Tab` — cycle | `[` `]` — tabs | `s` — search | `/` — filter | `c` — check | `b` — build | `t` — tree | `i` — inverse tree | `m` — copy mode | `q` — quit
+`1` `2` `3` — panels | `Tab` — cycle | `[` `]` — tabs | `s` — search | `/` — filter | `c` — check | `b` — build | `t` — tree | `i` — inverse tree | `d` — read docs in TUI | `D` — open docs.rs | `m` — copy mode | `q` — quit
 
 ## Acknowledgments
 

@@ -219,7 +219,9 @@ pub(crate) fn normal_key_action(key: KeyEvent, context: NormalKeyContext) -> Nor
         }
         KeyCode::Char('d') if context.search_expanded => NormalKeyAction::OpenDocsInline,
         KeyCode::Char('D') if context.search_expanded => NormalKeyAction::OpenDocs,
-        KeyCode::Char('d') if context.focus == Focus::Dependencies => NormalKeyAction::OpenDocsInline,
+        KeyCode::Char('d') if context.focus == Focus::Dependencies => {
+            NormalKeyAction::OpenDocsInline
+        }
         KeyCode::Char('D') if context.focus == Focus::Dependencies => NormalKeyAction::OpenDocsJump,
         KeyCode::Char('d') if context.ws_tab == WorkspaceTab::Target => {
             NormalKeyAction::DryRunCleanTarget
@@ -278,7 +280,11 @@ mod tests {
     fn context(deps: bool, search: bool) -> NormalKeyContext {
         NormalKeyContext {
             search_expanded: search,
-            focus: if deps { Focus::Dependencies } else { Focus::Workspace },
+            focus: if deps {
+                Focus::Dependencies
+            } else {
+                Focus::Workspace
+            },
             ws_tab: WorkspaceTab::CrateInfo,
             deps_tab: DependenciesTab::Features,
         }
