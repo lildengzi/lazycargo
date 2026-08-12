@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::core::command::{CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope};
 use crate::core::config::AppConfig;
 use crate::core::process::run_captured;
+use crate::core::project::ProjectInfo;
 use crate::core::search::{CrateSearchQuery, DependencyAddPlan, DependencyKind};
 
 /// a lazygit-style Cargo workspace TUI
@@ -275,22 +276,67 @@ pub fn run_cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
     match cli.command {
-        Command::Check(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Build(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Test(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Clippy(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Doc(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Run(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Update(args) => execute(&CargoTask::from(args).to_command(), &cwd),
-        Command::Add(args) => execute(&DependencyAddPlan::from(args).to_command(), &cwd),
+        Command::Check(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Build(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Test(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Clippy(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Doc(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Run(args) => execute_task(CargoTask::from(args), &cwd),
+        Command::Update(args) => execute(&CargoTask::from(args).to_command(), &cwd, false),
+        Command::Add(args) => execute(&DependencyAddPlan::from(args).to_command(), &cwd, false),
         Command::Search(args) => run_search(&CrateSearchQuery::from(args)),
         Command::Config => print_config(),
     }
 }
 
+/// 根据当前工作目录推断 scope。cwd 属于某个 workspace member → Package；在 workspace 根 → Workspace；否则 CurrentPackage。
+pub fn auto_scope(cwd: &Path, project: &ProjectInfo) -> TaskScope {
+    if project.workspace_packages.len() <= 1 {
+        return TaskScope::CurrentPackage;
+    }
+    let best = project
+        .workspace_packages
+        .iter()
+        .filter_map(|package| {
+            let pkg_dir = Path::new(&package.manifest_path).parent()?;
+            cwd.starts_with(pkg_dir).then_some((package, pkg_dir.as_os_str().len()))
+        })
+        .max_by_key(|(_, depth)| *depth);
+    if let Some((package, _)) = best {
+        return TaskScope::Package(package.name.clone());
+    }
+    if cwd.starts_with(Path::new(&project.workspace_root)) {
+        TaskScope::Workspace
+    } else {
+        TaskScope::CurrentPackage
+    }
+}
+
+/// 用户未显式指定 scope 时按 cwd 推断；返回是否应用了自动 scope。
+fn apply_auto_scope(task: &mut CargoTask, cwd: &Path) -> bool {
+    if task.scope != TaskScope::CurrentPackage {
+        return false;
+    }
+    let Ok(project) = ProjectInfo::load() else {
+        return false;
+    };
+    let scope = auto_scope(cwd, &project);
+    if scope == TaskScope::CurrentPackage {
+        return false;
+    }
+    task.scope = scope;
+    true
+}
+
+fn execute_task(mut task: CargoTask, cwd: &Path) -> anyhow::Result<()> {
+    let auto_scoped = apply_auto_scope(&mut task, cwd);
+    execute(&task.to_command(), cwd, auto_scoped)
+}
+
 /// Run a Cargo command inheriting stdout/stderr; propagate non-zero exits.
-fn execute(spec: &CommandSpec, cwd: &Path) -> anyhow::Result<()> {
-    println!("running: {}", spec.display());
+fn execute(spec: &CommandSpec, cwd: &Path, auto_scoped: bool) -> anyhow::Result<()> {
+    let annotation = if auto_scoped { " (auto-scope)" } else { "" };
+    println!("running: {}{}", spec.display(), annotation);
     let status = std::process::Command::new(&spec.program)
         .current_dir(cwd)
         .args(&spec.args)

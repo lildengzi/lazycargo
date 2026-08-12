@@ -3,11 +3,13 @@
 //! Parsing is side-effect free: `Cli::try_parse_from` / `CommandFactory::command()`
 //! never spawn `cargo`, so these tests assert command construction only.
 
+use std::path::Path;
+
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
-use lazycargo::cli::{Cli, Command};
-use lazycargo::CargoTask;
+use lazycargo::cli::{auto_scope, Cli, Command};
+use lazycargo::{CargoTask, PackageInfo, ProjectInfo, TaskScope};
 
 fn task_from(command: Command) -> CargoTask {
     match command {
@@ -152,6 +154,68 @@ fn rejects_dev_combined_with_build_dependency_kind() {
         Cli::try_parse_from(["lazycargo", "add", "tokio", "--dev", "--build"]).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+}
+
+fn member(name: &str, manifest_path: &str) -> PackageInfo {
+    PackageInfo {
+        name: name.to_owned(),
+        manifest_path: manifest_path.to_owned(),
+        ..PackageInfo::default()
+    }
+}
+
+fn project(workspace_root: &str, members: &[(&str, &str)]) -> ProjectInfo {
+    ProjectInfo {
+        workspace_root: workspace_root.to_owned(),
+        workspace_packages: members
+            .iter()
+            .map(|(name, path)| member(name, path))
+            .collect(),
+        ..ProjectInfo::default()
+    }
+}
+
+#[test]
+fn auto_scope_picks_workspace_member_from_inside_its_dir() {
+    let project = project("/ws", &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")]);
+
+    assert_eq!(
+        auto_scope(Path::new("/ws/a/src"), &project),
+        TaskScope::Package("a".to_owned())
+    );
+}
+
+#[test]
+fn auto_scope_returns_workspace_from_root_outside_any_member_dir() {
+    let project = project("/ws", &[("a", "/ws/a/Cargo.toml"), ("b", "/ws/b/Cargo.toml")]);
+
+    assert_eq!(auto_scope(Path::new("/ws"), &project), TaskScope::Workspace);
+}
+
+#[test]
+fn auto_scope_single_package_project_stays_current_package() {
+    let project = project("/p", &[("p", "/p/Cargo.toml")]);
+
+    assert_eq!(
+        auto_scope(Path::new("/p/src"), &project),
+        TaskScope::CurrentPackage
+    );
+}
+
+#[test]
+fn auto_scope_picks_deepest_member_for_nested_workspace() {
+    let project = project(
+        "/ws",
+        &[
+            ("outer", "/ws/Cargo.toml"),
+            ("inner", "/ws/inner/Cargo.toml"),
+        ],
+    );
+
+    assert_eq!(
+        auto_scope(Path::new("/ws/inner/src"), &project),
+        TaskScope::Package("inner".to_owned())
+    );
 }
 
 #[test]

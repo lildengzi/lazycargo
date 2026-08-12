@@ -29,7 +29,7 @@ pub struct ProjectInfo {
     pub rustc_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
