@@ -1,12 +1,10 @@
 use std::collections::BTreeSet;
 
-use crate::metadata::{DependencyInfo, PackageInfo, ProjectInfo};
-
-use crate::build_history::format_duration_ms;
-use crate::dep_tree;
-
+use crate::core::build_history::format_duration_ms;
+use crate::core::dep_tree;
 use crate::core::model::OutputSlot;
-use crate::util::{format_bytes, progress_bar};
+use crate::core::project::{DependencyInfo, PackageInfo, ProjectInfo};
+use crate::core::util::{format_bytes, progress_bar};
 
 use super::{App, BuildCoreTab, DependenciesTab, FocusPanel, HistoryEntry, WorkspaceTab};
 

@@ -1,5 +1,5 @@
-use crate::cargo_task::{CargoTask, CargoTaskKind, FeatureSelection, Profile, TaskScope};
-use crate::crates::{CrateSearchQuery, DependencyAddPlan, DependencyKind};
+use crate::core::command::{CargoTask, CargoTaskKind, FeatureSelection, Profile, TaskScope};
+use crate::core::search::{CrateSearchQuery, DependencyAddPlan, DependencyKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {

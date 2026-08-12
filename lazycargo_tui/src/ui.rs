@@ -23,25 +23,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::build_history::{is_recordable_command, BuildEntry, CrateTiming};
-use crate::cargo_task::{
+use crate::core::build_history::{is_recordable_command, BuildEntry, CrateTiming};
+use crate::core::command::{
     CargoTask, CargoTaskKind, CommandSpec, FeatureSelection, Profile, TaskScope,
 };
-use crate::config::AppConfig;
+use crate::core::config::AppConfig;
+use crate::core::dep_tree;
+use crate::core::project::ProjectInfo;
+use crate::core::model::{ContextOutput, CoreState, OutputSlot};
 use crate::core::process::{extract_diagnostics, spawn_streaming};
+use crate::core::target_analyzer::{self, DiskSnapshot};
 use crate::core::task::{
     info_progress_detail, run_info_job, run_search_job, search_progress_detail, SearchJobConfig,
     SearchJobKind,
 };
-use crate::dep_tree;
+use crate::core::util::format_bytes;
 use crate::keymap::{
     self, NormalKeyAction, NormalKeyContext, ProjectNewConfirmAction, TextInputAction,
 };
-use crate::metadata::ProjectInfo;
-use crate::core::model::{ContextOutput, CoreState, OutputSlot};
 use crate::state::{NavigationState, SelectionState};
-use crate::target_analyzer::{self, DiskSnapshot};
-use crate::util::format_bytes;
 use lazycargo_search::{SearchLinkTarget, SearchState};
 
 mod dashboard;
