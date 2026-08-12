@@ -4,4 +4,5 @@ pub mod process;
 pub mod project;
 pub mod search;
 pub mod store;
+pub mod task;
 pub mod util;
