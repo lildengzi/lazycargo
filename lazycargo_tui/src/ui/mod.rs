@@ -929,6 +929,11 @@ impl App {
     }
 
     fn run_cargo(&mut self, detail_focus: Focus, args: &[&str]) {
+        if self.core.processes.child.is_some() {
+            self.navigation.message = format!("already running: {}", self.core.processes.command);
+            return;
+        }
+
         let spec = self.build_cargo_command(args);
         let command = spec.display();
         let slot = match detail_focus {
