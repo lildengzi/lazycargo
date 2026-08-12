@@ -16,10 +16,12 @@ path = "src/lib.rs"
 
 [dependencies]
 ansi-to-tui = "8.0"
+anyhow = "1"
 arboard = "3.4"
 base64.workspace = true
 cargo_metadata = "0.19"
 chrono.workspace = true
+clap = { version = "4", features = ["derive"] }
 crossterm.workspace = true
 dirs.workspace = true
 lazycargo_search = { path = "../lazycargo_search", version = "0.2.0" }
@@ -27,6 +29,9 @@ open = "5.3"
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3"
+thiserror = "2"
+tui-markdown = "0.3.9"
 walkdir.workspace = true
 
 [[bin]]

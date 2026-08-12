@@ -7,6 +7,7 @@ pub mod dep_tree;
 pub mod keymap;
 pub mod metadata;
 pub mod state;
+pub mod core;
 pub mod target_analyzer;
 pub mod ui;
 pub mod util;
